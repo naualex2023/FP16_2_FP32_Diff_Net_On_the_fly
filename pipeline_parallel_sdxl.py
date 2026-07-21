@@ -78,8 +78,11 @@ def create_sdxl_pipeline_parallel(
     # Place text encoders on stage 0 (device_down)
     pipe.text_encoder = pipe.text_encoder.to(device_down)
     pipe.text_encoder_2 = pipe.text_encoder_2.to(device_down)
-    # VAE is small (~0.6 GB); keep on device_up to balance VRAM slightly
-    pipe.vae = pipe.vae.to(device_up)
+    # VAE must be on device_down: the scheduler loop and final latents live
+    # there, and diffusers calls ``self.vae.decode(latents)`` without moving
+    # latents to the VAE's device.  (VAE is only ~0.6 GB; device_down still
+    # fits in 24 GB: TE ~5 GB + down_blocks ~6.5 GB + VAE ~0.6 GB ≈ 12 GB.)
+    pipe.vae = pipe.vae.to(device_down)
     pipe.safety_checker = None
 
     # Scheduler
