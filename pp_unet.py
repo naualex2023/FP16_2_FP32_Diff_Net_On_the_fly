@@ -321,19 +321,50 @@ class PipelineParallelUNet(nn.Module):
             mid_block_additional_residual = mid_block_additional_residual.to(self.device_up)
 
         # ---- 1. Time embedding -----------------------------------------
-        t_emb = self.time_proj(timestep)
+        # NOTE: ``timestep`` may be a Python int/float or a 0-d tensor.  The
+        # diffusers ``UNet2DConditionModel.get_time_embed`` normalises it to a
+        # 1-d tensor on the sample's device before calling ``time_proj``.  We
+        # replicate that logic here (calling ``time_proj`` on a scalar raises
+        # "Timesteps should be a 1d-array").
+        timesteps = timestep
+        if not torch.is_tensor(timesteps):
+            t_dtype = (
+                torch.float64 if isinstance(timestep, float) else torch.int64
+            )
+            timesteps = torch.tensor(
+                [timesteps], dtype=t_dtype, device=self.device_down
+            )
+        elif len(timesteps.shape) == 0:
+            timesteps = timesteps[None].to(self.device_down)
+        # broadcast to batch dimension (ONNX/CoreML compatible)
+        timesteps = timesteps.expand(sample.shape[0])
+
+        t_emb = self.time_proj(timesteps)
+        # ``Timesteps`` returns float32; cast to the model dtype.
+        t_emb = t_emb.to(dtype=sample.dtype)
         emb = self.time_embedding(t_emb, timestep_cond)
 
         # ---- Class embedding (usually None) ----------------------------
         if self.class_embedding is not None:
-            class_emb = self.class_embedding(class_labels)
+            if class_labels is None:
+                raise ValueError(
+                    "class_labels must be provided when class_embedding is set"
+                )
+            if self.config.class_embed_type == "timestep":
+                class_labels = self.time_proj(class_labels)
+                class_labels = class_labels.to(dtype=sample.dtype)
+            class_emb = self.class_embedding(class_labels).to(dtype=sample.dtype)
             if getattr(self.config, "class_embeddings_concat", False):
                 emb = torch.cat([emb, class_emb], dim=-1)
             else:
                 emb = emb + class_emb
 
         # ---- Aug embedding (SDXL: text_time) ---------------------------
-        if self.config.addition_embed_type == "text_time":
+        aug_emb = None
+        if self.config.addition_embed_type == "text":
+            text_embs = added_cond_kwargs.get("text_embeds", encoder_hidden_states)
+            aug_emb = self.add_embedding(text_embs)
+        elif self.config.addition_embed_type == "text_time":
             text_embeds = added_cond_kwargs["text_embeds"]
             time_ids = added_cond_kwargs["time_ids"]
             time_embeds = self.add_time_proj(time_ids.flatten())
@@ -341,12 +372,11 @@ class PipelineParallelUNet(nn.Module):
             add_embeds = torch.cat([text_embeds, time_embeds], dim=-1)
             add_embeds = add_embeds.to(emb.dtype)
             aug_emb = self.add_embedding(add_embeds)
+        elif self.config.addition_embed_type == "image":
+            image_embs = added_cond_kwargs.get("image_embeds")
+            aug_emb = self.add_embedding(image_embs)
+        if aug_emb is not None:
             emb = emb + aug_emb
-        elif self.config.addition_embed_type == "text":
-            text_embs = added_cond_kwargs.get("text_embeds", encoder_hidden_states)
-            aug_emb = self.add_embedding(text_embs)
-            emb = emb + aug_emb
-        # other addition_embed_types are rare; skip for now
 
         if self.time_embed_act is not None:
             emb = self.time_embed_act(emb)

@@ -121,6 +121,33 @@ def test_dtype_property(tiny_sdxl_unet):
     assert pp.dtype == tiny_sdxl_unet.dtype
 
 
+def test_pp_unet_scalar_timestep(tiny_sdxl_unet):
+    """Regression: diffusers pipeline passes a scalar/0-d timestep.
+
+    Previously, calling ``time_proj`` directly on a scalar raised
+    'Timesteps should be a 1d-array'. This ensures scalar inputs work.
+    """
+    dev = "cuda:0"
+    unet = tiny_sdxl_unet.to(dev)
+    sample = torch.randn(1, 4, 16, 16, device=dev)
+    ehs = torch.randn(1, 5, 32, device=dev)
+    ack = {
+        "text_embeds": torch.randn(1, 32, device=dev),
+        "time_ids": torch.randn(1, 4, device=dev),
+    }
+
+    with torch.no_grad():
+        pp = PipelineParallelUNet(unet, device_down=dev, device_up=dev).to(dev)
+        # scalar int (what the SDXL scheduler actually passes at runtime)
+        out_scalar = pp(sample, 500, ehs, added_cond_kwargs=ack).sample
+        # 0-d tensor
+        out_0d = pp(sample, torch.tensor(500, device=dev), ehs, added_cond_kwargs=ack).sample
+
+    assert out_scalar.shape == sample.shape
+    assert out_0d.shape == sample.shape
+    assert torch.allclose(out_scalar, out_0d, atol=1e-5)
+
+
 if __name__ == "__main__":
     # Allow running without pytest
     import sys
