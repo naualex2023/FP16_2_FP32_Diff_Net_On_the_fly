@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# Models (large, downloaded via download_models.py)
+models/
+*.safetensors
+*.ckpt
+*.bin
+
+# Generated outputs
+output*.png
+out_*.png
+batch_output/
+turbo*.png
+sdxl_*.png
+img_*.png
+my_*.png
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Cline / stray temp
+FP16_

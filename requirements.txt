@@ -1,0 +1,20 @@
+# PyTorch (install separately for your CUDA version):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# P40 = Pascal compute 6.1, FP32-only. CUDA 12.1 recommended.
+torch>=2.1,<2.6
+torchvision>=0.16
+
+# Diffusers stack
+diffusers>=0.27.0
+transformers>=4.36.0
+accelerate>=0.25.0
+safetensors>=0.4.0
+peft>=0.7.0           # LoRA support
+compel>=2.0.2         # advanced prompt weighting (optional)
+
+# ControlNet preprocessors (optional)
+# controlnet-aux>=0.0.7
+
+# Image / utility
+Pillow>=9.5.0
+huggingface-hub>=0.20.0
