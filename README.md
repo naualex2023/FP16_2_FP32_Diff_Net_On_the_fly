@@ -68,6 +68,15 @@ python generate_one.py \
     "A cyberpunk cityscape at night, neon lights" \
     "A peaceful mountain lake at dawn"
 ```
+Short sequence:
+source ~/diffusion-env/bin/activate
+pip install -r requirements.txt
+python gpu_diagnostics.py
+python download_models.py --model sdxl
+python -m pytest test_pp_unet.py -v
+python generate_one.py --model ./models/sdxl-base-fp16 --gpu-down 0 --gpu-up 1 \
+    --prompt "A serene Japanese garden, koi pond, golden hour, 8k" --output garden.png
+./run_parallel.sh ./models/sdxl-base-fp16 "cyberpunk city" "mountain lake"
 
 ---
 
