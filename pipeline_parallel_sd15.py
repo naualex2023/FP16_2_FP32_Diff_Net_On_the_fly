@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def create_sd15_pipeline_parallel(
-    model_path: str = "./models/sd15-fp32",
+    model_path: str = "./models/sd15-fp16",
     device_down: str = "cuda:0",
     device_up: str = "cuda:1",
 ) -> "StableDiffusionPipeline":
@@ -56,7 +56,7 @@ def create_sd15_pipeline_parallel(
 
 def generate_sd15_pipeline_parallel(
     prompt: str,
-    model_path: str = "./models/sd15-fp32",
+    model_path: str = "./models/sd15-fp16",
     device_down: str = "cuda:0",
     device_up: str = "cuda:1",
     steps: int = 20,
