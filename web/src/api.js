@@ -77,6 +77,16 @@ export async function twin(payload) {
   );
 }
 
+export async function quadro(payload) {
+  return jsonOrThrow(
+    await fetch(`${BASE}/api/quadro`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+  );
+}
+
 export async function batch(payload) {
   return jsonOrThrow(
     await fetch(`${BASE}/api/batch`, {

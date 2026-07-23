@@ -77,10 +77,10 @@ export default function BatchPanel({ models, loras, onModelDownloaded }) {
     <div className="panel batch-panel">
       <div className="panel-layout">
         <div className="panel-left">
-          <h2>Batch (4 GPUs · multiprocess)</h2>
+          <h2>Batch (4 GPUs · 1 model per GPU, no split)</h2>
           <p className="panel-desc">
-            Run a batch of different prompts across all 4 GPUs. Each GPU pair processes prompts in
-            parallel with persistent workers (model loads once per pair).
+            Run a batch of <strong>different prompts</strong> across all 4 GPUs — one complete (un-split)
+            model per GPU (no pipeline split). Each GPU keeps its model cached for the whole batch.
           </p>
 
           {/* Prompts textarea */}
@@ -210,7 +210,7 @@ export default function BatchPanel({ models, loras, onModelDownloaded }) {
           ) : (
             <div className="placeholder">
               <p>Batch progress and results will appear here.</p>
-              <p className="hint">2 prompts run in parallel (one per GPU pair).</p>
+              <p className="hint">Up to 4 prompts run in parallel (one per GPU), each on a full model.</p>
             </div>
           )}
         </div>

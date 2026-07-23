@@ -6,7 +6,7 @@ import { subscribeJob } from "../api.js";
  * Props:
  *   jobId — the job to track
  *   onDone(job) — called when status === "done"
- *   variant — "single" | "twin" | "batch"
+ *   variant — "single" | "twin" | "quadro" | "batch"
  */
 export default function JobProgress({ jobId, onDone, variant = "single" }) {
   const [job, setJob] = useState(null);
@@ -54,6 +54,7 @@ export default function JobProgress({ jobId, onDone, variant = "single" }) {
         <span className={`status-badge ${job.status}`}>{statusLabel}</span>
         {variant === "single" && <span className="job-prompt">{job.prompt?.slice(0, 60)}</span>}
         {variant === "twin" && <span className="job-prompt">Twin: {job.prompt?.slice(0, 50)}</span>}
+        {variant === "quadro" && <span className="job-prompt">Quadro: {job.prompt?.slice(0, 46)}</span>}
         {variant === "batch" && (
           <span className="job-prompt">
             Batch: {job.completed || 0} / {job.total || 0}
@@ -101,6 +102,24 @@ export default function JobProgress({ jobId, onDone, variant = "single" }) {
         </div>
       )}
 
+      {/* Quadro sub-progress: one bar per GPU */}
+      {variant === "quadro" && job.sub_jobs && (
+        <div className="quadro-progress">
+          {["a", "b", "c", "d"].map((label, i) => (
+            <div className="sub-bar" key={label}>
+              <span>GPU {i}</span>
+              <div className="mini-bar">
+                <div
+                  className="mini-fill"
+                  style={{ width: `${job.sub_jobs[label]?.progress || 0}%` }}
+                />
+              </div>
+              <span>{job.sub_jobs[label]?.progress || 0}%</span>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* Results */}
       {job.status === "done" && (
         <div className="job-results">
@@ -111,6 +130,14 @@ export default function JobProgress({ jobId, onDone, variant = "single" }) {
             <div className="twin-results">
               {job.image_url_a && <img src={job.image_url_a} alt="result A" className="result-img half" />}
               {job.image_url_b && <img src={job.image_url_b} alt="result B" className="result-img half" />}
+            </div>
+          )}
+          {variant === "quadro" && (
+            <div className="quadro-results">
+              {job.image_url_a && <img src={job.image_url_a} alt="result A" className="result-img quad" />}
+              {job.image_url_b && <img src={job.image_url_b} alt="result B" className="result-img quad" />}
+              {job.image_url_c && <img src={job.image_url_c} alt="result C" className="result-img quad" />}
+              {job.image_url_d && <img src={job.image_url_d} alt="result D" className="result-img quad" />}
             </div>
           )}
           {variant === "batch" && job.image_urls && (

@@ -122,6 +122,36 @@ def test_twin_returns_job_id(client):
     assert "job_id" in resp.json()
 
 
+def test_quadro_returns_job_id(client):
+    """POST /api/quadro returns a job_id."""
+    resp = client.post(
+        "/api/quadro",
+        json={
+            "prompt": "a quadro test",
+            "steps": 4,
+            "width": 512,
+            "height": 512,
+            "seed_a": 42,
+            "seed_b": 43,
+            "seed_c": 44,
+            "seed_d": 45,
+        },
+    )
+    assert resp.status_code == 200
+    assert "job_id" in resp.json()
+
+
+def test_quadro_request_four_seeds():
+    """QuadroRequest requires four distinct seed fields."""
+    from api_server import QuadroRequest
+
+    req = QuadroRequest(prompt="test", seed_a=1, seed_b=2, seed_c=3, seed_d=4)
+    assert req.seed_a == 1
+    assert req.seed_b == 2
+    assert req.seed_c == 3
+    assert req.seed_d == 4
+
+
 def test_batch_returns_job_id(client):
     """POST /api/batch returns a job_id."""
     resp = client.post(

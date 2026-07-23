@@ -22,6 +22,7 @@ This implementation follows `DEV_GUIDE_pipeline_parallel_fp32_p40.md` and
 | `pp_unet.py` | **Core** — `PipelineParallelUNet`: splits a diffusers `UNet2DConditionModel` across two GPUs. Correct SDXL `text_time` aug-embedding, `conv_norm_out`/`conv_act`, ControlNet/adapter residuals. |
 | `pipeline_parallel_sdxl.py` | **Primary use case** — SDXL FP32 on 2 GPUs (down on GPU0, mid+up on GPU1). LoRA, schedulers, Turbo support. Routes through the keep-alive cache. |
 | `pipeline_parallel_sd15.py` | Educational SD 1.5 example on 2 GPUs (SD 1.5 FP32 fits on 1 P40, so PP isn't needed — good for testing). Routes through the keep-alive cache. |
+| `pipeline_single_gpu.py` | **Single-GPU pipeline (no split)** — loads one complete SDXL/SD 1.5 pipeline on a single device in FP32/FP16. Used by **Quadro mode** (4 images × 4 GPUs). LoRA, schedulers, Turbo support. Routes through the keep-alive cache. |
 | `pipeline_cache.py` | **Keep-alive cache** — `PipelineCache` keeps loaded pipelines resident across generations and frees them after an idle timeout (`SD_IDLE_TIMEOUT`). Fixes the "reload on every generation" problem. |
 | `async_transfer.py` | Optional `AsyncPipelineParallelUNet` — overlapped compute + PCIe transfer via CUDA streams. |
 | `parallel_pipelines_4gpu.py` | Run **two** pipeline-parallel SDXL instances on **four** GPUs (threaded + multiprocess back-ends). Reuses the cache per GPU pair / per worker process. |
@@ -136,7 +137,11 @@ generate_sdxl(
 )
 ```
 
-### Batch on 4 GPUs (multiprocess, recommended)
+### Batch on 4 GPUs (single-GPU per prompt, no split)
+
+Batch mode distributes different prompts across all 4 GPUs, each running a
+complete (un-split) model in FP32/FP16 — same as Quadro mode but with different
+prompts instead of the same prompt. Up to 4 prompts generate in parallel.
 
 ```python
 from parallel_pipelines_4gpu import generate_batch_parallel_processes
@@ -147,6 +152,38 @@ generate_batch_parallel_processes(
     steps=25,
 )
 ```
+
+Via the web API (`POST /api/batch`) or the **📦 Batch** tab.
+
+
+### Quadro mode — 4 images on 4 GPUs (no UNet split)
+
+Twin/Generate split the UNet across two GPUs because FP32 SDXL (~25 GB) doesn't
+fit on one P40.  **Most other models do fit** (SD 1.5 FP32 ~6.8 GB, SDXL-Turbo,
+any FP16 model).  Quadro mode exploits this: each of the 4 GPUs runs **one
+complete (un-split) FP32 pipeline** on the *same prompt* with its own seed,
+producing **four variations in the time of one**.  No activation ever crosses a
+PCIe boundary, so it's simpler and (for models that fit) faster than the split
+path.
+
+```python
+from pipeline_single_gpu import generate_single_gpu
+
+# One image on one GPU (the building block Quadro uses 4× in parallel):
+generate_single_gpu(
+    prompt="a serene Japanese garden, koi pond, golden hour",
+    arch="sd15",
+    device="cuda:0",
+    seed=42,
+    output_path="garden.png",
+)
+```
+
+Via the web API (`POST /api/quadro`) or the **🔮 Quadro** tab — pass the same
+prompt plus four seeds (`seed_a`/`seed_b`/`seed_c`/`seed_d`, one per GPU).
+> **Note:** full SDXL FP32 (~25 GB) does *not* fit on a single 24 GB P40, so
+> for SDXL use FP16 or Turbo in Quadro mode, or use Twin/Generate (which split
+> the model).  SD 1.5 FP32 works at full size.
 
 ### SDXL-Turbo (4 steps, CFG=0)
 
