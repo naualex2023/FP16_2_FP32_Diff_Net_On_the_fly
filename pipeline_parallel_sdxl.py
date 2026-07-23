@@ -142,6 +142,8 @@ def generate_sdxl(
     lora_path: Optional[str] = None,
     lora_scale: float = 1.0,
     force_unload: bool = False,
+    callback: Optional[callable] = None,
+    callback_kwargs: Optional[dict] = None,
 ):
     """Generate a single SDXL image across 2 GPUs (FP32).
 
@@ -181,6 +183,13 @@ def generate_sdxl(
     )
     if not is_turbo:
         call_kwargs["negative_prompt"] = negative_prompt
+
+    # Optional progress callback (diffusers calls callback(step, timestep, kwargs)).
+    if callback is not None:
+        call_kwargs["callback_on_step_end"] = lambda pipe, step, timestep, kw: callback(
+            step, float(timestep) if hasattr(timestep, "item") else timestep, kw
+        )
+        call_kwargs["callback_on_step_end_inputs"] = callback_kwargs or []
 
     logger.info(
         "Generating SDXL %dx%d, %d steps, CFG %.1f",
