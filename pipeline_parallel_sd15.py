@@ -15,6 +15,7 @@ Usage
 from __future__ import annotations
 
 import logging
+import os
 import time
 
 import torch
@@ -22,6 +23,16 @@ import torch
 from pp_unet import PipelineParallelUNet
 
 logger = logging.getLogger(__name__)
+
+
+class _NullLock:
+    """Context manager that does nothing (used when caching is disabled)."""
+
+    def __enter__(self) -> "_NullLock":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
 
 
 def create_sd15_pipeline_parallel(
@@ -66,30 +77,60 @@ def generate_sd15_pipeline_parallel(
     height: int = 512,
     negative_prompt: str = "",
     output_path: str = "output_sd15_pp.png",
+    force_unload: bool = False,
 ) -> "PIL.Image.Image":
-    """Generate a single SD 1.5 image across 2 GPUs (FP32)."""
-    pipe = create_sd15_pipeline_parallel(
-        model_path=model_path, device_down=device_down, device_up=device_up
+    """Generate a single SD 1.5 image across 2 GPUs (FP32).
+
+    Pipeline caching
+    ----------------
+    The loaded pipeline is kept resident across calls and reused on the next
+    generation.  It is automatically freed after an idle timeout (see
+    :mod:`pipeline_cache`, configurable via ``SD_IDLE_TIMEOUT`` /
+    ``SD_KEEP_ALIVE``).
+
+    Pass ``force_unload=True`` to free VRAM immediately after this call.
+    """
+    from pipeline_cache import cached_sd15_pipeline, get_cache
+
+    cache = get_cache()
+    pipe, entry = cached_sd15_pipeline(
+        model_path=model_path,
+        device_down=device_down,
+        device_up=device_up,
+        cache=cache,
     )
 
     generator = torch.Generator(device="cpu").manual_seed(seed)
     logger.info("Generating '%s' (%d steps, %dx%d)", prompt[:60], steps, width, height)
 
-    t0 = time.perf_counter()
-    image = pipe(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        num_inference_steps=steps,
-        guidance_scale=guidance_scale,
-        width=width,
-        height=height,
-        generator=generator,
-    ).images[0]
-    torch.cuda.synchronize()
-    dt = time.perf_counter() - t0
+    # Hold the per-entry lock so concurrent prompts on this GPU pair serialize.
+    entry_lock = entry.lock if entry is not None else _NullLock()
+    with entry_lock:
+        t0 = time.perf_counter()
+        image = pipe(
+            prompt=prompt,
+            negative_prompt=negative_prompt,
+            num_inference_steps=steps,
+            guidance_scale=guidance_scale,
+            width=width,
+            height=height,
+            generator=generator,
+        ).images[0]
+        torch.cuda.synchronize()
+        dt = time.perf_counter() - t0
 
     image.save(output_path)
     logger.info("Saved %s in %.1fs (%.2fs/step)", output_path, dt, dt / steps)
+
+    if force_unload:
+        key = (
+            "sd15",
+            os.path.abspath(model_path),
+            str(device_down),
+            str(device_up),
+        )
+        if cache.release(key):
+            logger.info("force_unload: pipeline freed")
     return image
 
 

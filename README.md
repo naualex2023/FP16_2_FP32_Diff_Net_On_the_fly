@@ -20,16 +20,18 @@ This implementation follows `DEV_GUIDE_pipeline_parallel_fp32_p40.md` and
 | File | Purpose |
 |------|---------|
 | `pp_unet.py` | **Core** — `PipelineParallelUNet`: splits a diffusers `UNet2DConditionModel` across two GPUs. Correct SDXL `text_time` aug-embedding, `conv_norm_out`/`conv_act`, ControlNet/adapter residuals. |
-| `pipeline_parallel_sdxl.py` | **Primary use case** — SDXL FP32 on 2 GPUs (down on GPU0, mid+up on GPU1). LoRA, schedulers, Turbo support. |
-| `pipeline_parallel_sd15.py` | Educational SD 1.5 example on 2 GPUs (SD 1.5 FP32 fits on 1 P40, so PP isn't needed — good for testing). |
+| `pipeline_parallel_sdxl.py` | **Primary use case** — SDXL FP32 on 2 GPUs (down on GPU0, mid+up on GPU1). LoRA, schedulers, Turbo support. Routes through the keep-alive cache. |
+| `pipeline_parallel_sd15.py` | Educational SD 1.5 example on 2 GPUs (SD 1.5 FP32 fits on 1 P40, so PP isn't needed — good for testing). Routes through the keep-alive cache. |
+| `pipeline_cache.py` | **Keep-alive cache** — `PipelineCache` keeps loaded pipelines resident across generations and frees them after an idle timeout (`SD_IDLE_TIMEOUT`). Fixes the "reload on every generation" problem. |
 | `async_transfer.py` | Optional `AsyncPipelineParallelUNet` — overlapped compute + PCIe transfer via CUDA streams. |
-| `parallel_pipelines_4gpu.py` | Run **two** pipeline-parallel SDXL instances on **four** GPUs (threaded + multiprocess back-ends). |
-| `generate_one.py` | CLI for single-image generation (SDXL / SD 1.5 / Turbo, LoRA, schedulers). |
+| `parallel_pipelines_4gpu.py` | Run **two** pipeline-parallel SDXL instances on **four** GPUs (threaded + multiprocess back-ends). Reuses the cache per GPU pair / per worker process. |
+| `generate_one.py` | CLI for single-image generation (SDXL / SD 1.5 / Turbo, LoRA, schedulers). `--serve` keeps the model resident across many prompts. |
 | `benchmark.py` | Compare FP16-1GPU vs FP32-pipeline-2GPU vs FP32-CPU-offload-1GPU. |
 | `gpu_diagnostics.py` | Verify hardware: per-GPU VRAM/compute, FP32 GEMM GFLOPS, P2P PCIe bandwidth, `nvidia-smi topo -m`. |
 | `download_models.py` | Fetch SD 1.5 / SDXL / SDXL-Turbo into `./models/`. |
 | `run_parallel.sh` | Launch two 2-GPU pipeline-parallel jobs in parallel (4 GPUs total). |
 | `test_pp_unet.py` | Unit tests — **verifies PP UNet output == reference UNet output** (numerically identical). |
+| `test_pipeline_cache.py` | Unit tests for the keep-alive cache (hit/miss, idle eviction, thread safety). No CUDA required. |
 | `requirements.txt` | Python dependencies. |
 | `DEV_GUIDE_pipeline_parallel_fp32_p40.md` | Original development guide (Russian). |
 | `USER_GUIDE_diffusers_p40.md` | User guide for diffusers on P40 (Russian). |
@@ -173,6 +175,98 @@ generate_sdxl(
 
 ---
 
+## Keep-alive model cache (no reload between generations)
+
+By default a one-shot CLI/script **reloads the model from disk on every call**
+(for SDXL that's ~25 GB + FP32 upcast + UNet split — slow).  The
+**keep-alive cache** fixes this: a loaded pipeline stays resident in VRAM and
+is reused by the next generation.  After a period of inactivity it is freed
+automatically (the "regulated timeout").
+
+### How it works
+
+`pipeline_cache.PipelineCache` is a process-wide singleton.  Every
+`generate_sdxl(...)` / `generate_sd15_pipeline_parallel(...)` call goes through
+it:
+
+* **First call** ("cache MISS") — loads + splits the model, stores it.
+* **Subsequent calls** with the same model/GPU/dtype/LoRA/scheduler ("cache
+  HIT") — returns the resident pipeline instantly; only the generation runs.
+* **Idle reaper** — a background thread frees any pipeline that hasn't been
+  used for `idle_timeout` seconds, calling `del pipe; gc.collect();
+  torch.cuda.empty_cache()`.  Each generation **resets the timer**, so the
+  model stays loaded while you're actively working and is reaped only when
+  genuinely idle.
+
+### Configuration (environment variables)
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `SD_KEEP_ALIVE` | `1` | `1` enable the cache (recommended); `0` disables it (old per-call reload behavior). |
+| `SD_IDLE_TIMEOUT` | `300` | Seconds of inactivity before an idle pipeline is freed. `0` = never auto-free (stays loaded until the process exits). |
+| `SD_REAPER_INTERVAL` | `30` | How often (s) the background thread scans for idle entries. |
+
+Examples:
+
+```bash
+# Keep the model for 10 minutes between generations:
+SD_IDLE_TIMEOUT=600 python generate_one.py --model ./models/sdxl-base-fp16 ...
+
+# Never auto-unload (model stays resident until the process exits):
+SD_IDLE_TIMEOUT=0 python generate_one.py --model ./models/sdxl-base-fp16 --serve
+
+# Disable caching entirely (reload every call, like before):
+SD_KEEP_ALIVE=0 python generate_one.py --model ./models/sdxl-base-fp16 ...
+```
+
+### Two ways to benefit
+
+**1. Same Python process (library/interactive use).** Any second call reuses
+the model automatically:
+
+```python
+from pipeline_parallel_sdxl import generate_sdxl
+
+# First call: loads + caches the pipeline (~30 s load + ~45 s generate)
+generate_sdxl("a cat", output_path="cat.png")
+# Second call: NO reload — only ~45 s generate (cache HIT)
+generate_sdxl("a dog", output_path="dog.png")
+# After 5 min idle: the reaper frees VRAM automatically.
+```
+
+**2. Persistent CLI server (`--serve`).** Because each `python generate_one.py`
+is a *fresh process*, back-to-back invocations can't share a cache.  Use
+`--serve` to keep one process alive and feed it prompts over stdin (the model
+loads once and is reused for every image):
+
+```bash
+python generate_one.py --model ./models/sdxl-base-fp16 --gpu-down 0 --gpu-up 1 --serve
+# READY — type prompts one per line, then 'quit':
+a cat on the moon|out_cat.png|seed=123|steps=20
+a mountain lake|out_lake.png|cfg=5
+quit
+```
+
+Each serve line is `prompt|output.png|key=value...` where keys can be
+`seed`, `steps`, `cfg`, `w`/`width`, `h`/`height`, `neg`/`negative`.
+The second field may be a bare output filename.
+
+### Programmatic control
+
+```python
+from pipeline_cache import get_cache
+
+cache = get_cache()
+# ... generate ...
+print(cache.stats())           # see resident entries + idle times
+cache.unload_all()             # free everything now
+```
+
+Pass `force_unload=True` to `generate_sdxl`/`generate_sd15_pipeline_parallel`
+to free that specific pipeline immediately after one generation.
+
+---
+
 ## Command-line interface
 
 ```bash
@@ -196,6 +290,8 @@ python generate_one.py --help
 | `--lora` | *None* | Path to LoRA `.safetensors` |
 | `--lora-scale` | `1.0` | LoRA strength |
 | `--fp16` | off | Use FP16 (**not recommended on P40**) |
+| `--serve` | off | **Persistent mode:** keep the process alive, read prompts from stdin, reuse the loaded model for each image (no reload). Type `quit` to exit. |
+| `--no-keep-alive` | off | Disable the idle-timeout cache — unload immediately after each job (old behavior). |
 
 ---
 
@@ -232,14 +328,16 @@ Additional robustness improvements over the guide:
 
 ```bash
 pip install pytest
-python -m pytest test_pp_unet.py -v
+python -m pytest test_pp_unet.py test_pipeline_cache.py -v
 ```
 
-The key test, `test_pp_unet_matches_reference`, builds a miniature
-SDXL-config UNet, runs it both as a plain module and wrapped in
-`PipelineParallelUNet` (both stages on the same device), and asserts the
-outputs match to within `1e-4`. This proves the split + transfer logic is
-faithful to the original `UNet2DConditionModel.forward`.
+- `test_pp_unet.py::test_pp_unet_matches_reference` builds a miniature
+  SDXL-config UNet, runs it both as a plain module and wrapped in
+  `PipelineParallelUNet` (both stages on the same device), and asserts the
+  outputs match to within `1e-4`. This proves the split + transfer logic is
+  faithful to the original `UNet2DConditionModel.forward`. *(requires CUDA)*
+- `test_pipeline_cache.py` covers the keep-alive cache (hit/miss, idle
+  eviction, thread safety). *(no CUDA / no real model required — fast)*
 
 ---
 

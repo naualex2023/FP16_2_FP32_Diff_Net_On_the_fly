@@ -13,8 +13,8 @@ Usage
 
 from __future__ import annotations
 
-import gc
 import logging
+import os
 import time
 from typing import Optional
 
@@ -141,9 +141,24 @@ def generate_sdxl(
     scheduler: str = "default",
     lora_path: Optional[str] = None,
     lora_scale: float = 1.0,
+    force_unload: bool = False,
 ):
-    """Generate a single SDXL image across 2 GPUs (FP32)."""
-    pipe = create_sdxl_pipeline_parallel(
+    """Generate a single SDXL image across 2 GPUs (FP32).
+
+    Pipeline caching
+    ----------------
+    The loaded pipeline is kept resident across calls and reused on the next
+    generation (huge speedup for back-to-back images).  It is automatically
+    freed after an idle timeout (see :mod:`pipeline_cache`, configurable via
+    the ``SD_IDLE_TIMEOUT`` / ``SD_KEEP_ALIVE`` env vars).
+
+    Pass ``force_unload=True`` to free VRAM immediately after this call
+    (mirrors the old "unload every time" behavior).
+    """
+    from pipeline_cache import cached_sdxl_pipeline, get_cache
+
+    cache = get_cache()
+    pipe, entry = cached_sdxl_pipeline(
         model_path=model_path,
         device_down=device_down,
         device_up=device_up,
@@ -151,6 +166,7 @@ def generate_sdxl(
         lora_path=lora_path,
         lora_scale=lora_scale,
         scheduler=scheduler,
+        cache=cache,
     )
 
     # SDXL-Turbo uses guidance_scale = 0.0 and needs no negative prompt.
@@ -170,19 +186,44 @@ def generate_sdxl(
         "Generating SDXL %dx%d, %d steps, CFG %.1f",
         width, height, steps, guidance_scale,
     )
-    t0 = time.perf_counter()
-    image = pipe(**call_kwargs).images[0]
-    torch.cuda.synchronize()
-    dt = time.perf_counter() - t0
+    # Hold the per-entry lock for the duration of the call so two prompts on
+    # the same GPU pair serialize rather than racing on the shared pipeline.
+    entry_lock = entry.lock if entry is not None else _NullLock()
+    with entry_lock:
+        t0 = time.perf_counter()
+        image = pipe(**call_kwargs).images[0]
+        torch.cuda.synchronize()
+        dt = time.perf_counter() - t0
 
     image.save(output_path)
     logger.info("Saved %s in %.1fs (%.2fs/step)", output_path, dt, dt / steps)
 
-    # Cleanup
-    del pipe
-    gc.collect()
-    torch.cuda.empty_cache()
+    if force_unload:
+        # Build the same key the cache used and evict it.
+        key = (
+            "sdxl",
+            os.path.abspath(model_path),
+            str(device_down),
+            str(device_up),
+            bool(use_fp32),
+            os.path.abspath(lora_path) if lora_path else None,
+            float(lora_scale),
+            str(scheduler),
+            False,  # compile
+        )
+        if cache.release(key):
+            logger.info("force_unload: pipeline freed")
     return image
+
+
+class _NullLock:
+    """Context manager that does nothing (used when caching is disabled)."""
+
+    def __enter__(self) -> "_NullLock":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        pass
 
 
 if __name__ == "__main__":
