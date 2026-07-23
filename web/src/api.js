@@ -18,6 +18,23 @@ export async function getModels() {
   return jsonOrThrow(await fetch(`${BASE}/api/models`));
 }
 
+/**
+ * Download any HuggingFace model repo into the server's models directory.
+ * The repo is stored on disk in FP16; the pipeline upcasts it to FP32 in
+ * memory at load time.
+ * @param {string} repoId - e.g. "stabilityai/sdxl-turbo"
+ * @param {object} [opts] - { pipeline_class, dtype, force }
+ */
+export async function downloadModel(repoId, opts = {}) {
+  return jsonOrThrow(
+    await fetch(`${BASE}/api/models/download`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repo_id: repoId, ...opts }),
+    })
+  );
+}
+
 export async function getLora() {
   return jsonOrThrow(await fetch(`${BASE}/api/lora`));
 }

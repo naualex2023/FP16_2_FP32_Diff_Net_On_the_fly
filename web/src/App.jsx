@@ -20,8 +20,12 @@ export default function App() {
   const [loras, setLoras] = useState([]);
   const [reuseParams, setReuseParams] = useState(null);
 
-  useEffect(() => {
+  const refreshModels = () => {
     getModels().then((r) => setModels(r.models)).catch(() => {});
+  };
+
+  useEffect(() => {
+    refreshModels();
     getLora().then((r) => setLoras(r.loras)).catch(() => {});
   }, []);
 
@@ -55,9 +59,9 @@ export default function App() {
       </header>
 
       <main className="app-main">
-        {tab === "generate" && <GeneratePanel models={models} loras={loras} key={reuseParams ? Date.now() : "g"} initialParams={reuseParams} />}
-        {tab === "twin" && <TwinPanel models={models} loras={loras} />}
-        {tab === "batch" && <BatchPanel models={models} loras={loras} />}
+        {tab === "generate" && <GeneratePanel models={models} loras={loras} key={reuseParams ? Date.now() : "g"} initialParams={reuseParams} onModelDownloaded={refreshModels} />}
+        {tab === "twin" && <TwinPanel models={models} loras={loras} onModelDownloaded={refreshModels} />}
+        {tab === "batch" && <BatchPanel models={models} loras={loras} onModelDownloaded={refreshModels} />}
         {tab === "gallery" && <GalleryPanel onReuseParams={handleReuse} />}
         {tab === "status" && <StatusPanel />}
       </main>

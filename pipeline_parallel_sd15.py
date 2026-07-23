@@ -43,6 +43,10 @@ def create_sd15_pipeline_parallel(
 ) -> "StableDiffusionPipeline":
     """Build a 2-GPU pipeline-parallel SD 1.5 pipeline (FP32)."""
     from diffusers import StableDiffusionPipeline
+    from model_resolver import resolve_model_path
+
+    # Allow model_path to be either a local directory OR a HuggingFace repo ID.
+    model_path = resolve_model_path(model_path)
 
     logger.info("Loading SD 1.5 FP32 from %s", model_path)
     pipe = StableDiffusionPipeline.from_pretrained(
@@ -140,9 +144,13 @@ def generate_sd15_pipeline_parallel(
     logger.info("Saved %s in %.1fs (%.2fs/step)", output_path, dt, dt / steps)
 
     if force_unload:
+        # Resolve the path the same way the cache builder does so repo IDs match.
+        from model_resolver import resolve_model_path
+
+        resolved = resolve_model_path(model_path)
         key = (
             "sd15",
-            os.path.abspath(model_path),
+            os.path.abspath(resolved),
             str(device_down),
             str(device_up),
         )

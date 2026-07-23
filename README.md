@@ -28,7 +28,8 @@ This implementation follows `DEV_GUIDE_pipeline_parallel_fp32_p40.md` and
 | `generate_one.py` | CLI for single-image generation (SDXL / SD 1.5 / Turbo, LoRA, schedulers). `--serve` keeps the model resident across many prompts. |
 | `benchmark.py` | Compare FP16-1GPU vs FP32-pipeline-2GPU vs FP32-CPU-offload-1GPU. |
 | `gpu_diagnostics.py` | Verify hardware: per-GPU VRAM/compute, FP32 GEMM GFLOPS, P2P PCIe bandwidth, `nvidia-smi topo -m`. |
-| `download_models.py` | Fetch SD 1.5 / SDXL / SDXL-Turbo into `./models/`. |
+| `download_models.py` | Fetch preset models (SD 1.5 / SDXL / Turbo) **or any HuggingFace repo** (`--repo org/name`) into `./models/`. |
+| `model_resolver.py` | **Generic model loader** — resolves a local path *or* HF repo ID, downloads repo IDs on first use, auto-detects architecture (sdxl/sd15). Used everywhere `model_path` is accepted. |
 | `run_parallel.sh` | Launch two 2-GPU pipeline-parallel jobs in parallel (4 GPUs total). |
 | `test_pp_unet.py` | Unit tests — **verifies PP UNet output == reference UNet output** (numerically identical). |
 | `test_pipeline_cache.py` | Unit tests for the keep-alive cache (hit/miss, idle eviction, thread safety). No CUDA required. |

@@ -36,6 +36,10 @@ from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+# Model-spec fields now accept EITHER a local path OR a HuggingFace repo ID.
+# The resolver (model_resolver.resolve_model_path) downloads repo IDs on first
+# use; see POST /api/models/download for explicit pre-download.
+
 logger = logging.getLogger("api_server")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -181,6 +185,17 @@ class BatchRequest(BaseModel):
 class CacheControlRequest(BaseModel):
     action: str = Field(..., description="unload_all | unload_one")
     key: Optional[str] = None
+
+
+class DownloadModelRequest(BaseModel):
+    """Download any HuggingFace model repo into the local models directory."""
+
+    repo_id: str = Field(..., description="HuggingFace repo ID, e.g. stabilityai/sdxl-turbo")
+    pipeline_class: Optional[str] = Field(
+        None, description="Diffusers pipeline class (auto-detected if omitted)"
+    )
+    dtype: str = Field("float16", description="'float16' (compact) or 'float32'")
+    force: bool = Field(False, description="Re-download even if already present")
 
 
 # ---------------------------------------------------------------------------
@@ -699,13 +714,47 @@ async def _startup():
 
 @app.get("/api/models")
 async def list_models():
+    """List locally available models, auto-detecting architecture for each."""
+    from model_resolver import infer_arch
+
     models = []
     if os.path.isdir(MODELS_DIR):
         for name in sorted(os.listdir(MODELS_DIR)):
             full = os.path.join(MODELS_DIR, name)
             if os.path.isdir(full):
-                models.append({"name": name, "path": full})
+                models.append({"name": name, "path": full, "arch": infer_arch(full)})
     return {"models": models}
+
+
+@app.post("/api/models/download")
+async def api_download_model(req: DownloadModelRequest):
+    """Download any HuggingFace diffusers repo into the local models directory.
+
+    Models are stored on disk in FP16 (compact); the pipeline-parallel code
+    upcasts them to FP32 in memory at load time.  Use this to pre-fetch a
+    repo before using it in generation, or just pass the repo ID directly to
+    /api/generate and it will be downloaded on first use.
+    """
+    from model_resolver import download_hf_model, infer_arch, is_hf_repo_id
+
+    if not is_hf_repo_id(req.repo_id):
+        raise HTTPException(400, f"'{req.repo_id}' is not a valid HuggingFace repo ID")
+
+    try:
+        path = await asyncio.get_event_loop().run_in_executor(
+            EXECUTOR,
+            lambda: download_hf_model(
+                repo_id=req.repo_id,
+                dtype=req.dtype,
+                pipeline_class=req.pipeline_class,
+                force=req.force,
+            ),
+        )
+        arch = infer_arch(path)
+        return {"ok": True, "repo_id": req.repo_id, "path": path, "arch": arch}
+    except Exception as exc:
+        logger.exception("Model download failed for %s", req.repo_id)
+        raise HTTPException(500, str(exc))
 
 
 @app.get("/api/lora")

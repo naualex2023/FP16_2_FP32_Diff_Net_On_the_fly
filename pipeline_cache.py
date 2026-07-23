@@ -342,12 +342,19 @@ def cached_sdxl_pipeline(
     """Return a (possibly cached) SDXL pipeline-parallel object.
 
     The cache key includes every parameter that changes what gets loaded, so
-    different models / GPUs / LoRAs / schedulers get distinct entries.
+    different models / GPUs / LoRAs / schedulers get distinct entries.  The
+    ``model_path`` is normalised via :mod:`model_resolver` so that a repo ID
+    and its downloaded local copy share one cache entry.
     """
+    from model_resolver import resolve_model_path
+
     cache = cache or get_cache()
+    # Resolve early so the cache key is identical whether the caller passed a
+    # local path or a HuggingFace repo ID.
+    resolved_path = resolve_model_path(model_path)
     key = (
         "sdxl",
-        os.path.abspath(model_path),
+        os.path.abspath(resolved_path),
         str(device_down),
         str(device_up),
         bool(use_fp32),
@@ -360,7 +367,7 @@ def cached_sdxl_pipeline(
     def _factory():
         from pipeline_parallel_sdxl import create_sdxl_pipeline_parallel
         return create_sdxl_pipeline_parallel(
-            model_path=model_path,
+            model_path=resolved_path,
             device_down=device_down,
             device_up=device_up,
             use_fp32=use_fp32,
@@ -379,11 +386,18 @@ def cached_sd15_pipeline(
     device_up: str,
     cache: Optional[PipelineCache] = None,
 ) -> Tuple[Any, Optional[_CacheEntry]]:
-    """Return a (possibly cached) SD 1.5 pipeline-parallel object."""
+    """Return a (possibly cached) SD 1.5 pipeline-parallel object.
+
+    The ``model_path`` is normalised via :mod:`model_resolver` so that a repo
+    ID and its downloaded local copy share one cache entry.
+    """
+    from model_resolver import resolve_model_path
+
     cache = cache or get_cache()
+    resolved_path = resolve_model_path(model_path)
     key = (
         "sd15",
-        os.path.abspath(model_path),
+        os.path.abspath(resolved_path),
         str(device_down),
         str(device_up),
     )
@@ -391,7 +405,7 @@ def cached_sd15_pipeline(
     def _factory():
         from pipeline_parallel_sd15 import create_sd15_pipeline_parallel
         return create_sd15_pipeline_parallel(
-            model_path=model_path,
+            model_path=resolved_path,
             device_down=device_down,
             device_up=device_up,
         )
