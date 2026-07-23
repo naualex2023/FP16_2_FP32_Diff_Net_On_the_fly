@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from typing import Optional
 
 import torch
 
@@ -78,6 +79,8 @@ def generate_sd15_pipeline_parallel(
     negative_prompt: str = "",
     output_path: str = "output_sd15_pp.png",
     force_unload: bool = False,
+    callback: Optional[callable] = None,
+    callback_kwargs: Optional[dict] = None,
 ) -> "PIL.Image.Image":
     """Generate a single SD 1.5 image across 2 GPUs (FP32).
 
@@ -103,19 +106,33 @@ def generate_sd15_pipeline_parallel(
     generator = torch.Generator(device="cpu").manual_seed(seed)
     logger.info("Generating '%s' (%d steps, %dx%d)", prompt[:60], steps, width, height)
 
+    call_kwargs = dict(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        num_inference_steps=steps,
+        guidance_scale=guidance_scale,
+        width=width,
+        height=height,
+        generator=generator,
+    )
+
+    # Optional progress callback.  diffusers >= 0.27 requires the callback to
+    # RETURN the ``callback_kwargs`` dict (it assigns our return value back to
+    # its own callback_kwargs and then calls ``.pop()`` on it).  Returning
+    # None raises "'NoneType' object has no attribute 'pop'" — the same
+    # Twin-mode failure seen on the SDXL path.  ``make_progress_callback``
+    # handles this contract for us.
+    if callback is not None:
+        from callback_utils import make_progress_callback
+
+        call_kwargs["callback_on_step_end"] = make_progress_callback(callback)
+        call_kwargs["callback_on_step_end_inputs"] = callback_kwargs or []
+
     # Hold the per-entry lock so concurrent prompts on this GPU pair serialize.
     entry_lock = entry.lock if entry is not None else _NullLock()
     with entry_lock:
         t0 = time.perf_counter()
-        image = pipe(
-            prompt=prompt,
-            negative_prompt=negative_prompt,
-            num_inference_steps=steps,
-            guidance_scale=guidance_scale,
-            width=width,
-            height=height,
-            generator=generator,
-        ).images[0]
+        image = pipe(**call_kwargs).images[0]
         torch.cuda.synchronize()
         dt = time.perf_counter() - t0
 

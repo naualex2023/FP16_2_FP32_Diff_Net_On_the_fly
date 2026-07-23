@@ -1,0 +1,6 @@
+# Web/API layer dependencies (in addition to requirements.txt)
+# The frontend (React) does NOT need pip packages — it uses Node.js/npm.
+
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
