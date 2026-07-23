@@ -116,11 +116,16 @@ def generate_sd15_pipeline_parallel(
         generator=generator,
     )
 
-    # Optional progress callback (diffusers calls callback(step, timestep, kwargs)).
+    # Optional progress callback.  diffusers >= 0.27 requires the callback to
+    # RETURN the ``callback_kwargs`` dict (it assigns our return value back to
+    # its own callback_kwargs and then calls ``.pop()`` on it).  Returning
+    # None raises "'NoneType' object has no attribute 'pop'" — the same
+    # Twin-mode failure seen on the SDXL path.  ``make_progress_callback``
+    # handles this contract for us.
     if callback is not None:
-        call_kwargs["callback_on_step_end"] = lambda pipe, step, timestep, kw: callback(
-            step, float(timestep) if hasattr(timestep, "item") else timestep, kw
-        )
+        from callback_utils import make_progress_callback
+
+        call_kwargs["callback_on_step_end"] = make_progress_callback(callback)
         call_kwargs["callback_on_step_end_inputs"] = callback_kwargs or []
 
     # Hold the per-entry lock so concurrent prompts on this GPU pair serialize.
