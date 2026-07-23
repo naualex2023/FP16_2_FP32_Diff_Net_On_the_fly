@@ -42,8 +42,11 @@ def generate_batch_parallel_threads(
 ):
     """Generate a batch using two in-process threads (one per GPU pair).
 
-    Note: builds the pipeline once per job (no caching).  For repeated
-    generation prefer :func:`generate_batch_parallel_processes`.
+    The loaded pipeline is cached and reused across jobs via
+    :mod:`pipeline_cache` (the first job on each GPU pair loads the model;
+    subsequent jobs reuse it).  Two prompts routed to the same GPU pair
+    serialize on the cache's per-entry lock, so only one generates at a time
+    per pair — matching the hardware constraint.
     """
     import threading
     import torch  # noqa: F401  (ensures CUDA init in main process)
@@ -113,12 +116,11 @@ def generate_batch_parallel_threads(
 # Multiprocess back-end (recommended)
 # ---------------------------------------------------------------------------
 
-def _mp_worker(
-    prompt: str,
-    seed: int,
+def _mp_worker_persistent(
+    in_q: "mp.Queue",
+    out_q: "mp.Queue",
     device_down: str,
     device_up: str,
-    output_path: str,
     model_path: str,
     steps: int,
     width: int,
@@ -126,24 +128,46 @@ def _mp_worker(
     guidance_scale: float,
     negative_prompt: str,
 ):
-    """Process entry-point: isolate CUDA, build pipeline, generate one image."""
-    import torch
+    """Persistent worker: loads model once, then serves many jobs from a queue.
+
+    Each item on ``in_q`` is ``(idx, prompt, seed, output_path)`` or ``None``
+    to signal shutdown.  Each result on ``out_q`` is ``(idx, ok, output_path
+    or error)``.  The loaded pipeline is cached per process via
+    :mod:`pipeline_cache`, so only the first job pays the load cost.
+    """
+    import torch  # noqa: F401  (CUDA init)
     from pipeline_parallel_sdxl import generate_sdxl
 
-    # Pin the process to the right GPU pair (best-effort; optional).
-    generate_sdxl(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        model_path=model_path,
-        device_down=device_down,
-        device_up=device_up,
-        steps=steps,
-        width=width,
-        height=height,
-        seed=seed,
-        guidance_scale=guidance_scale,
-        output_path=output_path,
-    )
+    while True:
+        job = in_q.get()
+        if job is None:  # shutdown sentinel
+            break
+        idx, prompt, seed, output_path = job
+        try:
+            generate_sdxl(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                model_path=model_path,
+                device_down=device_down,
+                device_up=device_up,
+                steps=steps,
+                width=width,
+                height=height,
+                seed=seed,
+                guidance_scale=guidance_scale,
+                output_path=output_path,
+            )
+            out_q.put((idx, True, output_path))
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Worker %s+%s failed job %d", device_down, device_up, idx)
+            out_q.put((idx, False, str(exc)))
+
+    # Free VRAM before the process exits.
+    try:
+        from pipeline_cache import get_cache
+        get_cache().unload_all()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def generate_batch_parallel_processes(
@@ -158,10 +182,13 @@ def generate_batch_parallel_processes(
     output_dir: str = "batch_output",
     gpu_pairs: Optional[list[tuple[str, str]]] = None,
 ):
-    """Generate a batch with one child process per GPU pair (recommended).
+    """Generate a batch with one persistent child process per GPU pair.
 
-    Each prompt is dispatched round-robin to the available GPU pairs.  This
-    avoids the GIL and gives full CUDA-context isolation.
+    Each GPU pair runs one long-lived worker that loads the model once and
+    reuses it for every prompt routed to that pair (cache-backed).  Prompts
+    are dispatched round-robin across the pairs; results are collected as
+    they finish.  This gives full CUDA-context isolation *and* amortizes the
+    model load across the batch.
     """
     os.makedirs(output_dir, exist_ok=True)
     if gpu_pairs is None:
@@ -170,53 +197,48 @@ def generate_batch_parallel_processes(
         seeds = [42 + i for i in range(len(prompts))]
 
     ctx = mp.get_context("spawn")  # CUDA-safe
-    procs: list[ctx.Process] = []  # type: ignore[name-defined]
-    next_idx = 0
+    in_q: "mp.Queue" = ctx.Queue()
+    out_q: "mp.Queue" = ctx.Queue()
+
+    # Enqueue all jobs tagged with their GPU-pair index.
+    for i, (prompt, seed) in enumerate(zip(prompts, seeds)):
+        out = os.path.join(output_dir, f"img_{i:03d}.png")
+        in_q.put((i, prompt, seed, out))
+
+    # One persistent worker per GPU pair.
+    workers = []
+    for pair in gpu_pairs:
+        in_q.put(None)  # one shutdown sentinel per worker
+        p = ctx.Process(
+            target=_mp_worker_persistent,
+            args=(
+                in_q, out_q, pair[0], pair[1], model_path,
+                steps, width, height, guidance_scale, negative_prompt,
+            ),
+            name=f"worker-{pair[0]}+{pair[1]}",
+        )
+        p.start()
+        workers.append(p)
 
     t0 = time.perf_counter()
-    while next_idx < len(prompts) or procs:
-        # Top up
-        while next_idx < len(prompts) and len(procs) < len(gpu_pairs):
-            i = next_idx
-            next_idx += 1
-            dev_down, dev_up = gpu_pairs[i % len(gpu_pairs)]
-            out = os.path.join(output_dir, f"img_{i:03d}.png")
-            p = ctx.Process(
-                target=_mp_worker,
-                args=(
-                    prompts[i],
-                    seeds[i],
-                    dev_down,
-                    dev_up,
-                    out,
-                    model_path,
-                    steps,
-                    width,
-                    height,
-                    guidance_scale,
-                    negative_prompt,
-                ),
-                name=f"job-{i}",
-            )
-            p.start()
-            procs.append(p)
-        # Reap at least one finished process before topping up again.
-        if procs:
-            procs[0].join()
-            if procs[0].exitcode != 0:
-                logger.error(
-                    "Process %s exited with code %s",
-                    procs[0].name,
-                    procs[0].exitcode,
-                )
-            # Drop the joined process; keep the rest.
-            procs = procs[1:]
-            time.sleep(0.05)
+    done = 0
+    total = len(prompts)
+    while done < total:
+        idx, ok, payload = out_q.get()
+        done += 1
+        if ok:
+            logger.info("[%d/%d] saved %s", done, total, payload)
+        else:
+            logger.error("[%d/%d] job %d failed: %s", done, total, idx, payload)
+
+    # Wait for workers to drain their shutdown sentinels and exit.
+    for p in workers:
+        p.join()
 
     dt = time.perf_counter() - t0
     logger.info(
         "Batch of %d images in %.1fs (%.1f img/min)",
-        len(prompts), dt, len(prompts) / dt * 60,
+        total, dt, total / dt * 60 if dt > 0 else 0.0,
     )
 
 
