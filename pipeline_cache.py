@@ -411,3 +411,52 @@ def cached_sd15_pipeline(
         )
 
     return cache.get_or_load(key, _factory)
+
+
+def cached_single_gpu_pipeline(
+    model_path: str,
+    device: str,
+    arch: str = "sdxl",
+    use_fp32: bool = True,
+    lora_path: Optional[str] = None,
+    lora_scale: float = 1.0,
+    scheduler: str = "default",
+    cache: Optional[PipelineCache] = None,
+) -> Tuple[Any, Optional[_CacheEntry]]:
+    """Return a (possibly cached) single-GPU pipeline object (no UNet split).
+
+    Used by Quadro mode, which runs four of these concurrently — one per GPU.
+    The cache key is distinct from the pipeline-parallel keys (prefix
+    ``"single"`` plus the ``arch``), so a model used in both split and
+    single-GPU modes keeps separate resident entries.  The ``model_path`` is
+    normalised via :mod:`model_resolver` so a repo ID and its downloaded local
+    copy share one cache entry.
+    """
+    from model_resolver import resolve_model_path
+
+    cache = cache or get_cache()
+    resolved_path = resolve_model_path(model_path)
+    key = (
+        "single",
+        str(arch),
+        os.path.abspath(resolved_path),
+        str(device),
+        bool(use_fp32),
+        os.path.abspath(lora_path) if lora_path else None,
+        float(lora_scale),
+        str(scheduler),
+    )
+
+    def _factory():
+        from pipeline_single_gpu import create_single_gpu_pipeline
+        return create_single_gpu_pipeline(
+            model_path=resolved_path,
+            device=device,
+            arch=arch,
+            use_fp32=use_fp32,
+            lora_path=lora_path,
+            lora_scale=lora_scale,
+            scheduler=scheduler,
+        )
+
+    return cache.get_or_load(key, _factory)

@@ -63,7 +63,7 @@ export default function GalleryPanel({ onReuseParams }) {
         <p>Loading…</p>
       ) : history.length === 0 ? (
         <div className="placeholder">
-          <p>No images yet. Generate some in the Generate, Twin, or Batch tabs!</p>
+          <p>No images yet. Generate some in the Generate, Twin, Quadro, or Batch tabs!</p>
         </div>
       ) : (
         <div className="gallery-grid">
@@ -89,6 +89,9 @@ export default function GalleryPanel({ onReuseParams }) {
                   <span className="tag">CFG {entry.guidance_scale}</span>
                   <span className="tag">seed {entry.seed}</span>
                   {entry.gpu_pair && <span className="tag">GPU {entry.gpu_pair}</span>}
+                  {entry.gpu && <span className="tag">{entry.gpu}</span>}
+                  {entry.twin_group && <span className="tag">twin</span>}
+                  {entry.quadro_group && <span className="tag">quadro</span>}
                 </div>
                 <div className="gallery-actions">
                   <button className="btn-small" onClick={() => handleReuse(entry)}>

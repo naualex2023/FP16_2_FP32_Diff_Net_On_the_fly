@@ -334,6 +334,9 @@ input[type="range"]::-webkit-slider-thumb {
 .result-img { width: 100%; border-radius: var(--radius); }
 .result-img.half { width: calc(50% - 4px); }
 .twin-results { display: flex; gap: 8px; }
+.result-img.quad { width: calc(50% - 4px); }
+.quadro-results { display: flex; flex-wrap: wrap; gap: 8px; }
+.quadro-progress { margin-top: 12px; }
 .batch-results { display: flex; flex-wrap: wrap; gap: 8px; }
 .result-thumb { width: 120px; height: 120px; object-fit: cover; border-radius: var(--radius); }
 

@@ -167,6 +167,33 @@ class TwinRequest(BaseModel):
     use_fp32: bool = True
 
 
+class QuadroRequest(BaseModel):
+    """Generate 4 images of the SAME prompt on 4 GPUs (one full model per GPU).
+
+    Unlike Twin mode, each GPU runs a complete (un-split) pipeline in FP32.
+    This avoids the UNet split, which is only needed for the largest models.
+    Best suited to checkpoints that fit on a single GPU (SD 1.5 FP32, SDXL in
+    FP16, SDXL-Turbo, etc.).
+    """
+
+    prompt: str = Field(...)
+    negative_prompt: str = "blurry, low quality, distorted, ugly"
+    model_path: str = "./models/sdxl-base-fp16"
+    arch: str = "sdxl"
+    steps: int = Field(25, ge=1, le=100)
+    width: int = Field(1024, ge=64, le=2048, multiple_of=8)
+    height: int = Field(1024, ge=64, le=2048, multiple_of=8)
+    seed_a: int = Field(-1, description="Seed for GPU 0; -1 = random")
+    seed_b: int = Field(-1, description="Seed for GPU 1; -1 = random")
+    seed_c: int = Field(-1, description="Seed for GPU 2; -1 = random")
+    seed_d: int = Field(-1, description="Seed for GPU 3; -1 = random")
+    guidance_scale: float = Field(7.5, ge=0.0, le=30.0)
+    scheduler: str = Field("default")
+    lora_path: Optional[str] = None
+    lora_scale: float = Field(1.0, ge=0.0, le=2.0)
+    use_fp32: bool = True
+
+
 class BatchRequest(BaseModel):
     prompts: List[str] = Field(..., description="List of prompts")
     negative_prompt: str = "blurry, low quality, distorted, ugly"
@@ -180,6 +207,7 @@ class BatchRequest(BaseModel):
     scheduler: str = Field("default")
     lora_path: Optional[str] = None
     lora_scale: float = Field(1.0, ge=0.0, le=2.0)
+    use_fp32: bool = True
 
 
 class CacheControlRequest(BaseModel):
@@ -589,104 +617,288 @@ def _run_twin_generation(job_id: str, req: TwinRequest) -> None:
         )
 
 
-def _run_batch_generation(job_id: str, req: BatchRequest) -> None:
-    """Batch via the multiprocess 4-GPU backend."""
+def _run_quadro_generation(job_id: str, req: QuadroRequest) -> None:
+    """Run 4 images of the same prompt on 4 GPUs (one full model per GPU).
+
+    Unlike Twin, there is no UNet split: each GPU loads a complete pipeline in
+    FP32.  This is only feasible for models that fit on a single GPU (SD 1.5
+    FP32, SDXL FP16, SDXL-Turbo, ...); for full-SDXL FP32 use Twin/Generate.
+    """
+    seeds = {
+        "a": _resolve_seed(req.seed_a),
+        "b": _resolve_seed(req.seed_b),
+        "c": _resolve_seed(req.seed_c),
+        "d": _resolve_seed(req.seed_d),
+    }
     JOBS.update(
         job_id,
         status="running",
         stage="loading",
         progress=0,
-        total=len(req.prompts),
-        completed=0,
+        sub_jobs={
+            "a": {"progress": 0},
+            "b": {"progress": 0},
+            "c": {"progress": 0},
+            "d": {"progress": 0},
+        },
+        seeds=seeds,
         started_at=datetime.now(timezone.utc).isoformat(),
     )
 
-    try:
-        import parallel_pipelines_4gpu as pp4
+    progress = {"a": 0, "b": 0, "c": 0, "d": 0}
 
-        out_dir = os.path.join(OUTPUT_DIR, job_id)
-        os.makedirs(out_dir, exist_ok=True)
+    def make_cb(label: str):
+        def cb(step: int, timestep: float, kwargs: Any) -> None:
+            pct = int(step / req.steps * 100) if req.steps > 0 else 0
+            progress[label] = pct
+            overall = sum(progress.values()) // 4
+            JOBS.update(
+                job_id,
+                progress=overall,
+                sub_jobs={
+                    "a": {"progress": progress["a"], "step": None},
+                    "b": {"progress": progress["b"], "step": None},
+                    "c": {"progress": progress["c"], "step": None},
+                    "d": {"progress": progress["d"], "step": None},
+                },
+                stage="generating",
+            )
 
-        # We cannot stream progress from the multiprocess backend easily, so
-        # we run it in a thread and poll the output directory for finished
-        # images to report approximate progress.
-        done_holder: Dict[str, int] = {"n": 0}
+        return cb
 
-        def runner():
-            seeds = [req.base_seed + i for i in range(len(req.prompts))]
-            pp4.generate_batch_parallel_processes(
-                prompts=req.prompts,
+    errors: List[str] = []
+
+    def work(label: str, device: str):
+        try:
+            from pipeline_single_gpu import generate_single_gpu
+
+            out_path = os.path.join(OUTPUT_DIR, f"{job_id}_{label}.png")
+            generate_single_gpu(
+                prompt=req.prompt,
+                negative_prompt=req.negative_prompt,
                 model_path=req.model_path,
+                device=device,
+                arch=req.arch,
                 steps=req.steps,
                 width=req.width,
                 height=req.height,
+                seed=seeds[label],
                 guidance_scale=req.guidance_scale,
-                negative_prompt=req.negative_prompt,
-                seeds=seeds,
-                output_dir=out_dir,
+                use_fp32=req.use_fp32,
+                output_path=out_path,
+                scheduler=req.scheduler,
+                lora_path=req.lora_path,
+                lora_scale=req.lora_scale,
+                callback=make_cb(label),
             )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"GPU {device}: {exc}")
 
-        t = threading.Thread(target=runner, name=f"{job_id}-batch")
+    # One thread per GPU.  Each occupies a different device, so they run truly
+    # in parallel without contending for the same pipeline.
+    devices = {"a": "cuda:0", "b": "cuda:1", "c": "cuda:2", "d": "cuda:3"}
+    threads = [
+        threading.Thread(target=work, args=(label, dev), name=f"{job_id}-gpu{label}")
+        for label, dev in devices.items()
+    ]
+    for t in threads:
         t.start()
+    for t in threads:
+        t.join()
 
-        # Poll for completion by counting files in out_dir.
-        total = len(req.prompts)
-        while t.is_alive():
-            try:
-                files = [f for f in os.listdir(out_dir) if f.endswith(".png")]
-                done_holder["n"] = len(files)
-                pct = int(len(files) / total * 100) if total else 0
-                JOBS.update(
-                    job_id,
-                    progress=pct,
-                    completed=len(files),
-                    stage="generating",
-                )
-            except Exception:
-                pass
-            t.join(timeout=2.0)
-
-        files = sorted(f for f in os.listdir(out_dir) if f.endswith(".png"))
-        image_urls = [f"/gallery/{job_id}/{f}" for f in files]
-
-        JOBS.update(
-            job_id,
-            status="done",
-            progress=100,
-            stage="complete",
-            completed=len(files),
-            image_urls=image_urls,
-            output_dir=out_dir,
-            finished_at=datetime.now(timezone.utc).isoformat(),
-        )
-
-        for i, (prompt, fname) in enumerate(zip(req.prompts, files)):
-            _add_history_entry(
-                {
-                    "job_id": f"{job_id}_{i:03d}",
-                    "batch_id": job_id,
-                    "prompt": prompt,
-                    "negative_prompt": req.negative_prompt,
-                    "arch": req.arch,
-                    "model_path": req.model_path,
-                    "steps": req.steps,
-                    "width": req.width,
-                    "height": req.height,
-                    "seed": req.base_seed + i,
-                    "guidance_scale": req.guidance_scale,
-                    "scheduler": req.scheduler,
-                    "image_url": f"/gallery/{job_id}/{fname}",
-                    "created_at": datetime.now(timezone.utc).isoformat(),
-                }
-            )
-    except Exception as exc:
-        logger.exception("Batch job %s failed", job_id)
+    if errors:
         JOBS.update(
             job_id,
             status="failed",
             stage="error",
-            error=str(exc),
+            error="; ".join(errors),
             finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return
+
+    JOBS.update(
+        job_id,
+        status="done",
+        progress=100,
+        stage="complete",
+        image_url_a=f"/gallery/{job_id}_a.png",
+        image_url_b=f"/gallery/{job_id}_b.png",
+        image_url_c=f"/gallery/{job_id}_c.png",
+        image_url_d=f"/gallery/{job_id}_d.png",
+        finished_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    for label, seed in seeds.items():
+        _add_history_entry(
+            {
+                "job_id": f"{job_id}_{label}",
+                "prompt": req.prompt,
+                "negative_prompt": req.negative_prompt,
+                "arch": req.arch,
+                "model_path": req.model_path,
+                "steps": req.steps,
+                "width": req.width,
+                "height": req.height,
+                "seed": seed,
+                "guidance_scale": req.guidance_scale,
+                "scheduler": req.scheduler,
+                "lora_path": req.lora_path,
+                "lora_scale": req.lora_scale,
+                "gpu": devices[label],
+                "image_url": f"/gallery/{job_id}_{label}.png",
+                "quadro_group": job_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+
+
+def _run_batch_generation(job_id: str, req: BatchRequest) -> None:
+    """Batch via 4 single-GPU workers (one complete model per GPU, no split).
+
+    Like Quadro mode, each of the 4 GPUs runs a complete (un-split) pipeline.
+    Prompts are distributed round-robin across the GPUs via a shared work
+    queue; each GPU keeps its model cached for the whole batch.
+    """
+    total = len(req.prompts)
+    JOBS.update(
+        job_id,
+        status="running",
+        stage="loading",
+        progress=0,
+        total=total,
+        completed=0,
+        started_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    seeds = [req.base_seed + i for i in range(total)]
+    out_dir = os.path.join(OUTPUT_DIR, job_id)
+    os.makedirs(out_dir, exist_ok=True)
+
+    # Build the work queue: (idx, prompt, seed, output_path)
+    work_queue: list[tuple[int, str, int, str]] = []
+    for i, prompt in enumerate(req.prompts):
+        out_path = os.path.join(out_dir, f"img_{i:03d}.png")
+        work_queue.append((i, prompt, seeds[i], out_path))
+
+    queue_lock = threading.Lock()
+    next_idx = [0]  # mutable counter for round-robin dispatch
+    completed_count = [0]
+    errors: List[str] = []
+
+    devices = ["cuda:0", "cuda:1", "cuda:2", "cuda:3"]
+
+    def worker(device: str):
+        """Pull jobs from the shared queue until exhausted."""
+        from pipeline_single_gpu import generate_single_gpu
+
+        while True:
+            with queue_lock:
+                if next_idx[0] >= len(work_queue):
+                    return  # no more jobs
+                idx, prompt, seed, out_path = work_queue[next_idx[0]]
+                next_idx[0] += 1
+
+            def cb(step: int, timestep: float, kwargs: Any) -> None:
+                # Approximate per-batch progress: fraction of steps done on
+                # this job contributes to overall completion.
+                job_frac = step / req.steps if req.steps > 0 else 0
+                with queue_lock:
+                    done = completed_count[0]
+                overall = int((done + job_frac) / total * 100)
+                JOBS.update(
+                    job_id,
+                    progress=min(overall, 99),
+                    completed=done,
+                    stage="generating",
+                )
+
+            try:
+                generate_single_gpu(
+                    prompt=prompt,
+                    negative_prompt=req.negative_prompt,
+                    model_path=req.model_path,
+                    device=device,
+                    arch=req.arch,
+                    steps=req.steps,
+                    width=req.width,
+                    height=req.height,
+                    seed=seed,
+                    guidance_scale=req.guidance_scale,
+                    use_fp32=req.use_fp32,
+                    output_path=out_path,
+                    scheduler=req.scheduler,
+                    lora_path=req.lora_path,
+                    lora_scale=req.lora_scale,
+                    callback=cb,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"GPU {device} job {idx}: {exc}")
+
+            with queue_lock:
+                completed_count[0] += 1
+                done = completed_count[0]
+            JOBS.update(
+                job_id,
+                progress=int(done / total * 100),
+                completed=done,
+                stage="generating",
+            )
+
+    # Launch one worker thread per GPU.
+    threads = [
+        threading.Thread(target=worker, args=(dev,), name=f"{job_id}-batch-{dev}")
+        for dev in devices
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    if errors:
+        JOBS.update(
+            job_id,
+            status="failed",
+            stage="error",
+            error="; ".join(errors[:5]),
+            finished_at=datetime.now(timezone.utc).isoformat(),
+        )
+        return
+
+    files = sorted(f for f in os.listdir(out_dir) if f.endswith(".png"))
+    image_urls = [f"/gallery/{job_id}/{f}" for f in files]
+
+    JOBS.update(
+        job_id,
+        status="done",
+        progress=100,
+        stage="complete",
+        completed=len(files),
+        image_urls=image_urls,
+        output_dir=out_dir,
+        finished_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+    for i, (prompt, fname) in enumerate(zip(req.prompts, files)):
+        _add_history_entry(
+            {
+                "job_id": f"{job_id}_{i:03d}",
+                "batch_id": job_id,
+                "prompt": prompt,
+                "negative_prompt": req.negative_prompt,
+                "arch": req.arch,
+                "model_path": req.model_path,
+                "steps": req.steps,
+                "width": req.width,
+                "height": req.height,
+                "seed": req.base_seed + i,
+                "guidance_scale": req.guidance_scale,
+                "scheduler": req.scheduler,
+                "lora_path": req.lora_path,
+                "lora_scale": req.lora_scale,
+                "use_fp32": req.use_fp32,
+                "image_url": f"/gallery/{job_id}/{fname}",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
         )
 
 
@@ -830,6 +1042,28 @@ async def api_twin(req: TwinRequest):
     JOBS.create(job_id, job)
     # Twin uses BOTH pairs, so run it directly (it manages its own threads).
     threading.Thread(target=_run_twin_generation, args=(job_id, req), name=f"{job_id}-twin").start()
+    return {"job_id": job_id}
+
+
+@app.post("/api/quadro")
+async def api_quadro(req: QuadroRequest):
+    """4 images of the same prompt on 4 GPUs (one full model per GPU, no split)."""
+    job_id = uuid.uuid4().hex[:12]
+    job = {
+        "job_id": job_id,
+        "type": "quadro",
+        "status": "queued",
+        "prompt": req.prompt,
+        "arch": req.arch,
+        "steps": req.steps,
+        "width": req.width,
+        "height": req.height,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "progress": 0,
+    }
+    JOBS.create(job_id, job)
+    # Quadro uses all 4 GPUs directly (it manages its own threads).
+    threading.Thread(target=_run_quadro_generation, args=(job_id, req), name=f"{job_id}-quadro").start()
     return {"job_id": job_id}
 
 
