@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-download_models.py — Fetch SD 1.5 / SDXL / SDXL-Turbo into ./models/.
+download_models.py — Fetch diffusion models into ./models/.
 
-Models are stored in their native dtype (FP16) for compactness; weights are
-upcast to FP32 at load time by the pipeline-parallel code.
+Two modes are supported:
 
-Usage:
+1. **Preset models** (the three originals):
     python download_models.py --model sd15
     python download_models.py --model sdxl
     python download_models.py --model sdxl-turbo
     python download_models.py --model all
+
+2. **Any HuggingFace repo** (new — removes the hardcoding):
+    python download_models.py --repo stabilityai/sdxl-turbo
+    python download_models.py --repo runwayml/stable-diffusion-v1-5 --class StableDiffusionPipeline
+    python download_models.py --repo <org>/<name> --dtype float32
+
+Models are stored in their native dtype (FP16 by default) for compactness;
+weights are upcast to FP32 at load time by the pipeline-parallel code.
 """
 
 from __future__ import annotations
@@ -43,6 +50,7 @@ MODELS = {
 
 
 def download(name: str, force: bool = False) -> None:
+    """Download one of the preset models by short name."""
     import torch  # noqa: F401
     import diffusers
     info = MODELS[name]
@@ -64,14 +72,45 @@ def download(name: str, force: bool = False) -> None:
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(
+        description="Download preset or arbitrary HuggingFace diffusion models."
+    )
     ap.add_argument(
         "--model",
         choices=list(MODELS) + ["all"],
-        required=True,
+        default=None,
+        help="Preset model short name (sd15 / sdxl / sdxl-turbo / all)",
     )
+    ap.add_argument(
+        "--repo",
+        default=None,
+        help="Arbitrary HuggingFace repo ID, e.g. stabilityai/sdxl-turbo",
+    )
+    ap.add_argument(
+        "--class",
+        dest="pipeline_class",
+        default=None,
+        help="Diffusers pipeline class (auto-detected if omitted)",
+    )
+    ap.add_argument("--dtype", default="float16", choices=["float16", "float32"])
     ap.add_argument("--force", action="store_true")
     args = ap.parse_args()
+
+    if args.repo:
+        from model_resolver import download_hf_model, infer_arch
+
+        path = download_hf_model(
+            repo_id=args.repo,
+            dtype=args.dtype,
+            pipeline_class=args.pipeline_class,
+            force=args.force,
+        )
+        arch = infer_arch(path)
+        logger.info("OK: %s -> %s (arch=%s)", args.repo, path, arch)
+        return
+
+    if not args.model:
+        ap.error("one of --model or --repo is required")
 
     targets = list(MODELS) if args.model == "all" else [args.model]
     for t in targets:

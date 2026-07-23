@@ -503,9 +503,69 @@ input[type="range"]::-webkit-slider-thumb {
   to { opacity: 1; }
 }
 
+/* Custom HF model input row */
+.custom-model-row {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.custom-model-row input {
+  flex: 1;
+  font-family: monospace;
+  font-size: 13px;
+}
+
+.custom-model-row .btn-secondary {
+  white-space: nowrap;
+}
+
+.custom-model-row .btn-icon {
+  font-size: 14px;
+  padding: 8px 10px;
+}
+
+/* Download status feedback */
+.dl-status {
+  margin-top: 6px;
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: var(--radius);
+}
+
+.dl-status.dl-loading {
+  color: var(--text-dim);
+  background: var(--bg-input);
+}
+
+.dl-status.dl-ok {
+  color: var(--success);
+  background: rgba(34, 197, 94, 0.1);
+}
+
+.dl-status.dl-error {
+  color: var(--danger);
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.hint {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.hint code {
+  background: var(--bg-input);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 11px;
+}
+
 /* Responsive */
 @media (max-width: 900px) {
   .panel-layout { grid-template-columns: 1fr; }
   .app-header { flex-direction: column; height: auto; padding: 12px; gap: 8px; }
   .tabs { flex-wrap: wrap; justify-content: center; }
+  .custom-model-row { flex-wrap: wrap; }
 }

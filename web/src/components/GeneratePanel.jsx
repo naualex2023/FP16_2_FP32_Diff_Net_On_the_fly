@@ -9,8 +9,9 @@ import { DEFAULT_NEGATIVE, defaultModel } from "../presets.js";
  * Props:
  *   models, loras — option lists
  *   initialParams — optional preset config (from Gallery "reuse")
+ *   onModelDownloaded — refresh callback after a new model is downloaded
  */
-export default function GeneratePanel({ models, loras, initialParams }) {
+export default function GeneratePanel({ models, loras, initialParams, onModelDownloaded }) {
   const [params, setParams] = useState({
     prompt: initialParams?.prompt ?? "",
     negative_prompt: initialParams?.negative_prompt ?? DEFAULT_NEGATIVE,
@@ -54,7 +55,7 @@ export default function GeneratePanel({ models, loras, initialParams }) {
       <div className="panel-layout">
         <div className="panel-left">
           <h2>Generate (1 image · 2 GPUs)</h2>
-          <Controls params={params} setParams={setParams} models={models} loras={loras} />
+          <Controls params={params} setParams={setParams} models={models} loras={loras} onModelDownloaded={onModelDownloaded} />
 
           {/* GPU pair selector */}
           <div className="control-row">

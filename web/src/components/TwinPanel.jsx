@@ -8,7 +8,7 @@ import { DEFAULT_NEGATIVE, defaultModel } from "../presets.js";
  * Twin mode: 2 images of the SAME prompt on 4 GPUs simultaneously.
  * Pair A (GPU 0+1) generates with seed_a, Pair B (GPU 2+3) with seed_b.
  */
-export default function TwinPanel({ models, loras }) {
+export default function TwinPanel({ models, loras, onModelDownloaded }) {
   const [params, setParams] = useState({
     prompt: "",
     negative_prompt: DEFAULT_NEGATIVE,
@@ -62,7 +62,7 @@ export default function TwinPanel({ models, loras }) {
             0+1, Pair B on GPU 2+3. Different seeds give you two variations in the time of one.
           </p>
 
-          <Controls params={params} setParams={setParams} models={models} loras={loras} />
+          <Controls params={params} setParams={setParams} models={models} loras={loras} onModelDownloaded={onModelDownloaded} />
 
           {/* Twin-specific: two seeds */}
           <div className="control-row twin-seeds">

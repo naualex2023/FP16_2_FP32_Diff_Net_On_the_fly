@@ -61,6 +61,10 @@ def create_sdxl_pipeline_parallel(
         EulerDiscreteScheduler,
         StableDiffusionXLPipeline,
     )
+    from model_resolver import resolve_model_path
+
+    # Allow model_path to be either a local directory OR a HuggingFace repo ID.
+    model_path = resolve_model_path(model_path)
 
     dtype = torch.float32 if use_fp32 else torch.float16
     logger.info("Loading SDXL from %s (%s)", model_path, "FP32" if use_fp32 else "FP16")
@@ -212,10 +216,14 @@ def generate_sdxl(
     logger.info("Saved %s in %.1fs (%.2fs/step)", output_path, dt, dt / steps)
 
     if force_unload:
-        # Build the same key the cache used and evict it.
+        # Build the same key the cache used and evict it.  Resolve the path
+        # the same way the cache builder does so repo IDs match.
+        from model_resolver import resolve_model_path
+
+        resolved = resolve_model_path(model_path)
         key = (
             "sdxl",
-            os.path.abspath(model_path),
+            os.path.abspath(resolved),
             str(device_down),
             str(device_up),
             bool(use_fp32),

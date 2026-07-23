@@ -1,14 +1,21 @@
-import React from "react";
+import React, { useState } from "react";
 import { ASPECT_RATIOS, QUICK_PRESETS, DEFAULT_NEGATIVE, defaultModel } from "../presets.js";
+import { downloadModel } from "../api.js";
 
 /**
  * Shared generation-parameter controls.
  * Props:
  *   params, setParams — controlled state (the generate form config)
  *   models, loras — option lists from the API
+ *   onModelDownloaded — optional callback when a new model is downloaded
+ *                      (e.g. to refresh the models list in the parent)
  */
-export default function Controls({ params, setParams, models = [], loras = [] }) {
+export default function Controls({ params, setParams, models = [], loras = [], onModelDownloaded }) {
   const set = (key, value) => setParams((p) => ({ ...p, [key]: value }));
+
+  // Custom HF repo input + download state.
+  const [customRepo, setCustomRepo] = useState("");
+  const [dlStatus, setDlStatus] = useState(null); // {state:"idle|loading|ok|error", msg}
 
   const applyPreset = (preset) => {
     setParams((p) => ({
@@ -28,6 +35,26 @@ export default function Controls({ params, setParams, models = [], loras = [] })
   };
 
   const randomizeSeed = () => set("seed", Math.floor(Math.random() * 2 ** 31));
+
+  const handleDownload = async () => {
+    const repo = customRepo.trim();
+    if (!repo || !repo.includes("/")) {
+      setDlStatus({ state: "error", msg: "Enter a repo ID like org/name" });
+      return;
+    }
+    setDlStatus({ state: "loading", msg: `Downloading ${repo}…` });
+    try {
+      const r = await downloadModel(repo);
+      setDlStatus({ state: "ok", msg: `Saved ${repo} → ${r.path} (arch=${r.arch})` });
+      setCustomRepo("");
+      // Auto-select the newly downloaded model + architecture.
+      set("model_path", r.path);
+      if (r.arch) set("arch", r.arch);
+      if (onModelDownloaded) onModelDownloaded();
+    } catch (e) {
+      setDlStatus({ state: "error", msg: e.message });
+    }
+  };
 
   return (
     <div className="controls">
@@ -88,15 +115,56 @@ export default function Controls({ params, setParams, models = [], loras = [] })
             value={params.model_path}
             onChange={(e) => set("model_path", e.target.value)}
           >
+            {/* Current value is always present (even if it's a custom repo ID). */}
             <option value={params.model_path}>{params.model_path}</option>
             {models
               .filter((m) => m.path !== params.model_path)
               .map((m) => (
                 <option key={m.path} value={m.path}>
-                  {m.name}
+                  {m.name}{m.arch ? ` [${m.arch}]` : ""}
                 </option>
               ))}
           </select>
+        </div>
+      </div>
+
+      {/* Custom HF model: type a repo ID to download or use directly. */}
+      <div className="control-group">
+        <label htmlFor="customrepo">Add HuggingFace model (repo ID)</label>
+        <div className="custom-model-row">
+          <input
+            id="customrepo"
+            type="text"
+            value={customRepo}
+            onChange={(e) => setCustomRepo(e.target.value)}
+            placeholder="e.g. stabilityai/sdxl-turbo"
+            onKeyDown={(e) => e.key === "Enter" && handleDownload()}
+          />
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={handleDownload}
+            disabled={dlStatus?.state === "loading"}
+            title="Download the repo into ./models (stored as FP16; upcast to FP32 at load)"
+          >
+            {dlStatus?.state === "loading" ? "…" : "⬇ Download"}
+          </button>
+          <button
+            type="button"
+            className="btn-icon"
+            onClick={() => customRepo.trim() && set("model_path", customRepo.trim())}
+            title="Use this repo ID directly (downloaded on first generation)"
+          >
+            ➤
+          </button>
+        </div>
+        {dlStatus && (
+          <div className={`dl-status dl-${dlStatus.state}`}>{dlStatus.msg}</div>
+        )}
+        <div className="hint">
+          Tip: a repo ID (e.g. <code>stabilityai/sdxl-turbo</code>) can be passed
+          directly as the model — it is downloaded on first use. Models are stored
+          on disk as FP16 and upcast to FP32 in memory at load time.
         </div>
       </div>
 

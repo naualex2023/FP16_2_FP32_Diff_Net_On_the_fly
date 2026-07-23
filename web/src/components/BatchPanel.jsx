@@ -1,13 +1,13 @@
 import React, { useState } from "react";
 import JobProgress from "./JobProgress.jsx";
-import { batch } from "../api.js";
+import { batch, downloadModel } from "../api.js";
 import { DEFAULT_NEGATIVE, defaultModel } from "../presets.js";
 
 /**
  * Batch generation: many prompts → 4-GPU multiprocess backend.
  * Prompts are entered one per line. Optional shared params (steps, size, etc.).
  */
-export default function BatchPanel({ models, loras }) {
+export default function BatchPanel({ models, loras, onModelDownloaded }) {
   const [promptsText, setPromptsText] = useState("");
   const [shared, setShared] = useState({
     negative_prompt: DEFAULT_NEGATIVE,
@@ -26,6 +26,8 @@ export default function BatchPanel({ models, loras }) {
   const [jobId, setJobId] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+  const [customRepo, setCustomRepo] = useState("");
+  const [dlStatus, setDlStatus] = useState(null);
 
   const set = (key, value) => setShared((p) => ({ ...p, [key]: value }));
 
@@ -47,6 +49,25 @@ export default function BatchPanel({ models, loras }) {
     } catch (e) {
       setError(e.message);
       setBusy(false);
+    }
+  };
+
+  const handleDownload = async () => {
+    const repo = customRepo.trim();
+    if (!repo || !repo.includes("/")) {
+      setDlStatus({ state: "error", msg: "Enter a repo ID like org/name" });
+      return;
+    }
+    setDlStatus({ state: "loading", msg: `Downloading ${repo}…` });
+    try {
+      const r = await downloadModel(repo);
+      setDlStatus({ state: "ok", msg: `Saved ${repo} → ${r.path} (arch=${r.arch})` });
+      setCustomRepo("");
+      set("model_path", r.path);
+      if (r.arch) set("arch", r.arch);
+      if (onModelDownloaded) onModelDownloaded();
+    } catch (e) {
+      setDlStatus({ state: "error", msg: e.message });
     }
   };
 
@@ -89,10 +110,44 @@ export default function BatchPanel({ models, loras }) {
               <select id="b-model" value={shared.model_path} onChange={(e) => set("model_path", e.target.value)}>
                 <option value={shared.model_path}>{shared.model_path}</option>
                 {models.filter((m) => m.path !== shared.model_path).map((m) => (
-                  <option key={m.path} value={m.path}>{m.name}</option>
+                  <option key={m.path} value={m.path}>{m.name}{m.arch ? ` [${m.arch}]` : ""}</option>
                 ))}
               </select>
             </div>
+          </div>
+
+          {/* Custom HF model input for batch mode */}
+          <div className="control-group">
+            <label htmlFor="b-customrepo">Add HuggingFace model (repo ID)</label>
+            <div className="custom-model-row">
+              <input
+                id="b-customrepo"
+                type="text"
+                value={customRepo}
+                onChange={(e) => setCustomRepo(e.target.value)}
+                placeholder="e.g. stabilityai/sdxl-turbo"
+                onKeyDown={(e) => e.key === "Enter" && handleDownload()}
+              />
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={handleDownload}
+                disabled={dlStatus?.state === "loading"}
+              >
+                {dlStatus?.state === "loading" ? "…" : "⬇ Download"}
+              </button>
+              <button
+                type="button"
+                className="btn-icon"
+                onClick={() => customRepo.trim() && set("model_path", customRepo.trim())}
+                title="Use this repo ID directly (downloaded on first generation)"
+              >
+                ➤
+              </button>
+            </div>
+            {dlStatus && (
+              <div className={`dl-status dl-${dlStatus.state}`}>{dlStatus.msg}</div>
+            )}
           </div>
 
           <div className="control-row">
