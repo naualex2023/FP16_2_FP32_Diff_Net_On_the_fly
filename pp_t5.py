@@ -1,12 +1,12 @@
 """
 pp_t5.py - Pipeline-parallel T5-XXL encoder for Tesla P40 (FP32).
 
-T5-XXL (``text_encoder_3`` in SD3/SD3.5) is ~18-23 GB in FP32 - too large
+T5-XXL (text_encoder_3 in SD3/SD3.5) is ~18-23 GB in FP32 - too large
 for a single 24 GB P40 once any margin for activations is reserved.  This
 module shards the T5 encoder across N GPUs using the same hook-based
-technique as :mod:`pp_dit`: the original encoder's ``encoder.block``
-ModuleList is split into chunks, each chunk lives on one GPU, and
-forward hooks move the hidden state across device boundaries.
+technique as pp_dit: the encoder's block ModuleList is split into chunks,
+each chunk lives on one GPU, and forward hooks move the hidden state
+across device boundaries.
 
 Usage
 -----
@@ -46,11 +46,26 @@ class PipelineParallelT5(nn.Module):
 
         object.__setattr__(self, "_encoder", encoder)
 
-        block_list = getattr(encoder, "block", None)
-        if not isinstance(block_list, nn.ModuleList) or len(block_list) == 0:
+        # T5 structure: T5EncoderModel.encoder (T5Stack).block (ModuleList).
+        # Search multiple possible locations for the block ModuleList.
+        block_list = None
+        block_container = encoder
+        # Direct: encoder.block
+        bl = getattr(encoder, "block", None)
+        if isinstance(bl, nn.ModuleList) and len(bl) > 0:
+            block_list = bl
+        # Nested: encoder.encoder.block (T5EncoderModel -> T5Stack)
+        if block_list is None:
+            inner = getattr(encoder, "encoder", None)
+            if inner is not None:
+                bl = getattr(inner, "block", None)
+                if isinstance(bl, nn.ModuleList) and len(bl) > 0:
+                    block_list = bl
+                    block_container = inner
+        if block_list is None:
             raise ValueError(
                 f"{type(encoder).__name__} has no non-empty 'block' "
-                f"ModuleList to split."
+                f"ModuleList to split (checked .block and .encoder.block)."
             )
         blocks = list(block_list)
         n_blocks = len(blocks)
@@ -78,16 +93,19 @@ class PipelineParallelT5(nn.Module):
             self.stage_layers.append(chunk)
             idx += size
 
+        # Place shared embedding and final_layer_norm on the home device.
+        # These may live on the T5EncoderModel or on the inner T5Stack.
         home = self.devices[0]
-        for name in ("shared", "embed_tokens"):
-            mod = getattr(encoder, name, None)
-            if isinstance(mod, nn.Module):
-                mod.to(home)
-                setattr(self, name, mod)
-        final = getattr(encoder, "final_layer_norm", None)
-        if isinstance(final, nn.Module):
-            final.to(home)
-            self.final_layer_norm = final
+        for container in (encoder, block_container):
+            for name in ("shared", "embed_tokens"):
+                mod = getattr(container, name, None)
+                if isinstance(mod, nn.Module):
+                    mod.to(home)
+                    setattr(self, name, mod)
+            final = getattr(container, "final_layer_norm", None)
+            if isinstance(final, nn.Module):
+                final.to(home)
+                self.final_layer_norm = final
 
         self.config = getattr(encoder, "config", None)
         self._orig_cls = type(encoder).__name__
