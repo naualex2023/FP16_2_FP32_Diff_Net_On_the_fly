@@ -126,7 +126,7 @@ JOBS = JobManager()
 # Pydantic models (request bodies)
 # ---------------------------------------------------------------------------
 
-ARCH_CHOICES = ["sdxl", "sd15"]
+ARCH_CHOICES = ["sdxl", "sd15", "dit"]
 SCHEDULER_CHOICES = ["default", "ddim", "euler", "dpmpp_2m"]
 ASPECT_PRESETS = ["1:1", "3:4", "4:3", "16:9", "9:16", "2:3", "3:2"]
 
@@ -378,10 +378,28 @@ def _run_single_generation(
                 output_path=out_path,
                 callback=cb,
             )
+        elif req.arch == "dit":
+            from pipeline_parallel_dit import generate_dit
+
+            generate_dit(
+                prompt=req.prompt,
+                negative_prompt=req.negative_prompt,
+                model_path=req.model_path,
+                device_down=dev_down,
+                device_up=dev_up,
+                steps=req.steps,
+                width=req.width,
+                height=req.height,
+                seed=seed,
+                guidance_scale=req.guidance_scale,
+                use_fp32=req.use_fp32,
+                output_path=out_path,
+                scheduler=req.scheduler,
+                callback=cb,
+            )
         else:
             from pipeline_parallel_sdxl import generate_sdxl
 
-            out_path = os.path.join(OUTPUT_DIR, f"{job_id}.png")
             generate_sdxl(
                 prompt=req.prompt,
                 negative_prompt=req.negative_prompt,
@@ -499,6 +517,25 @@ def _run_twin_generation(job_id: str, req: TwinRequest) -> None:
                     output_path=out_a,
                     callback=make_cb("a"),
                 )
+            elif req.arch == "dit":
+                from pipeline_parallel_dit import generate_dit
+
+                generate_dit(
+                    prompt=req.prompt,
+                    negative_prompt=req.negative_prompt,
+                    model_path=req.model_path,
+                    device_down="cuda:0",
+                    device_up="cuda:1",
+                    steps=req.steps,
+                    width=req.width,
+                    height=req.height,
+                    seed=seed_a,
+                    guidance_scale=req.guidance_scale,
+                    use_fp32=req.use_fp32,
+                    output_path=out_a,
+                    scheduler=req.scheduler,
+                    callback=make_cb("a"),
+                )
             else:
                 generate_sdxl(
                     prompt=req.prompt,
@@ -539,6 +576,25 @@ def _run_twin_generation(job_id: str, req: TwinRequest) -> None:
                     width=req.width,
                     height=req.height,
                     output_path=out_b,
+                    callback=make_cb("b"),
+                )
+            elif req.arch == "dit":
+                from pipeline_parallel_dit import generate_dit
+
+                generate_dit(
+                    prompt=req.prompt,
+                    negative_prompt=req.negative_prompt,
+                    model_path=req.model_path,
+                    device_down="cuda:2",
+                    device_up="cuda:3",
+                    steps=req.steps,
+                    width=req.width,
+                    height=req.height,
+                    seed=seed_b,
+                    guidance_scale=req.guidance_scale,
+                    use_fp32=req.use_fp32,
+                    output_path=out_b,
+                    scheduler=req.scheduler,
                     callback=make_cb("b"),
                 )
             else:
@@ -995,6 +1051,7 @@ async def get_config():
         "default_model": "./models/sdxl-base-fp16",
         "default_model_sdxl": "./models/sdxl-base-fp16",
         "default_model_sd15": "./models/sd15-fp16",
+        "default_model_dit": "PixArt-alpha/PixArt-XL-2-1024-MS",
         "default_model_turbo": "./models/sdxl-turbo",
         "gpu_pairs": ["0+1", "2+3"],
     }

@@ -36,6 +36,11 @@ export const QUICK_PRESETS = [
     label: "Creative",
     config: { steps: 35, guidance_scale: 12.0, scheduler: "euler", arch: "sdxl" },
   },
+  {
+    id: "pixart",
+    label: "PixArt-α (DiT)",
+    config: { steps: 20, guidance_scale: 4.5, scheduler: "default", arch: "dit" },
+  },
 ];
 
 export const DEFAULT_NEGATIVE =
@@ -43,5 +48,6 @@ export const DEFAULT_NEGATIVE =
 
 export function defaultModel(arch) {
   if (arch === "sd15") return "./models/sd15-fp16";
+  if (arch === "dit") return "PixArt-alpha/PixArt-XL-2-1024-MS";
   return "./models/sdxl-base-fp16";
 }

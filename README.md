@@ -6,7 +6,8 @@ GPUs and transferring only activations (~55 MB/step), not weights.
 
 > **Why FP32 on P40?** The Tesla P40 is Pascal (2016): FP16 compute is broken
 > (0.18 TFLOPS, 1/64 of FP32). SDXL in FP32 needs ~25 GB, which exceeds one
-> card's 24 GB. Pipeline parallelism across 2 GPUs solves this; the other 2
+> card's 24 GB. Pipeline parallelism across 2 GPUs solves this; for DiT models
+> (PixArt/Sana/SD3/Flux) it is the only way to run 30-50 GB FP32 weights.  The other 2
 > GPUs run a second pipeline for 2× throughput.
 
 This implementation follows `DEV_GUIDE_pipeline_parallel_fp32_p40.md` and
@@ -20,6 +21,8 @@ This implementation follows `DEV_GUIDE_pipeline_parallel_fp32_p40.md` and
 | File | Purpose |
 |------|---------|
 | `pp_unet.py` | **Core** — `PipelineParallelUNet`: splits a diffusers `UNet2DConditionModel` across two GPUs. Correct SDXL `text_time` aug-embedding, `conv_norm_out`/`conv_act`, ControlNet/adapter residuals. |
+| `pp_dit.py` | **Core (DiT)** — `PipelineParallelDiT`: splits a diffusers Transformer backbone (PixArt/Sana/SD3/Flux…) across two GPUs by cutting the `transformer_blocks` sequence in half. Version-robust hook-based design; numerically identical to the single-GPU forward. |
+| `pipeline_parallel_dit.py` | **DiT use case** — PixArt/Sana/SD3/Flux FP32 on 2 GPUs (first half of transformer blocks on GPU0, second half on GPU1). Required for 30-50 GB DiT models that exceed one P40. Routes through the keep-alive cache. |
 | `pipeline_parallel_sdxl.py` | **Primary use case** — SDXL FP32 on 2 GPUs (down on GPU0, mid+up on GPU1). LoRA, schedulers, Turbo support. Routes through the keep-alive cache. |
 | `pipeline_parallel_sd15.py` | Educational SD 1.5 example on 2 GPUs (SD 1.5 FP32 fits on 1 P40, so PP isn't needed — good for testing). Routes through the keep-alive cache. |
 | `pipeline_single_gpu.py` | **Single-GPU pipeline (no split)** — loads one complete SDXL/SD 1.5 pipeline on a single device in FP32/FP16. Used by **Quadro mode** (4 images × 4 GPUs). LoRA, schedulers, Turbo support. Routes through the keep-alive cache. |
@@ -30,9 +33,10 @@ This implementation follows `DEV_GUIDE_pipeline_parallel_fp32_p40.md` and
 | `benchmark.py` | Compare FP16-1GPU vs FP32-pipeline-2GPU vs FP32-CPU-offload-1GPU. |
 | `gpu_diagnostics.py` | Verify hardware: per-GPU VRAM/compute, FP32 GEMM GFLOPS, P2P PCIe bandwidth, `nvidia-smi topo -m`. |
 | `download_models.py` | Fetch preset models (SD 1.5 / SDXL / Turbo) **or any HuggingFace repo** (`--repo org/name`) into `./models/`. |
-| `model_resolver.py` | **Generic model loader** — resolves a local path *or* HF repo ID, downloads repo IDs on first use, auto-detects architecture (sdxl/sd15). Used everywhere `model_path` is accepted. |
+| `model_resolver.py` | **Generic model loader** — resolves a local path *or* HF repo ID, downloads repo IDs on first use, auto-detects architecture (`sdxl`/`sd15`/`dit`). Used everywhere `model_path` is accepted. |
 | `run_parallel.sh` | Launch two 2-GPU pipeline-parallel jobs in parallel (4 GPUs total). |
 | `test_pp_unet.py` | Unit tests — **verifies PP UNet output == reference UNet output** (numerically identical). |
+| `test_pp_dit.py` | Unit tests — **verifies PP DiT output == reference DiT output** (numerically identical), plus split-count and stage-placement checks. Run on the P40 server with `py_test test_pp_dit.py -v`. |
 | `test_pipeline_cache.py` | Unit tests for the keep-alive cache (hit/miss, idle eviction, thread safety). No CUDA required. |
 | `requirements.txt` | Python dependencies. |
 | `DEV_GUIDE_pipeline_parallel_fp32_p40.md` | Original development guide (Russian). |

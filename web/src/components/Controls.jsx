@@ -104,8 +104,9 @@ export default function Controls({ params, setParams, models = [], loras = [], o
         <div className="control-group">
           <label htmlFor="arch">Architecture</label>
           <select id="arch" value={params.arch} onChange={(e) => set("arch", e.target.value)}>
-            <option value="sdxl">SDXL</option>
-            <option value="sd15">SD 1.5</option>
+            <option value="sdxl">SDXL (UNet)</option>
+            <option value="dit">DiT (PixArt/Sana/SD3/Flux)</option>
+            <option value="sd15">SD 1.5 (UNet)</option>
           </select>
         </div>
         <div className="control-group grow">

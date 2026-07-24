@@ -15,14 +15,15 @@ which transparently handles two cases:
    ``SD_MODELS_DIR``) and the local path is returned.  Subsequent references
    hit the local copy without re-downloading.
 
-Architecture (``sdxl`` / ``sd15``) auto-detection is also provided via
-:func:`infer_arch`, which reads ``model_index.json`` from the resolved path.
+Architecture (``sdxl`` / ``sd15`` / ``dit``) auto-detection is also provided
+via :func:`infer_arch`, which reads ``model_index.json`` from the resolved
+path.
 
 Public API
 ----------
 * :func:`is_hf_repo_id` — heuristic: does this string look like a repo ID?
 * :func:`resolve_model_path` — local path or repo ID → local directory path.
-* :func:`infer_arch` — detect ``sdxl`` / ``sd15`` from a model directory.
+* :func:`infer_arch` — detect ``sdxl`` / ``sd15`` / ``dit`` from a model dir.
 * :func:`download_hf_model` — explicit download of any HF repo.
 """
 
@@ -56,6 +57,17 @@ _CLASS_TO_ARCH = {
     "StableDiffusionPipeline": "sd15",
     "StableDiffusionImg2ImgPipeline": "sd15",
     "StableDiffusionInpaintPipeline": "sd15",
+    # DiT (Transformer backbone) pipelines — 30–50 GB in FP32, split across two
+    # GPUs via pp_dit.PipelineParallelDiT instead of the UNet wrapper.
+    "PixArtAlphaPipeline": "dit",
+    "PixArtSigmaPipeline": "dit",
+    "SanaPipeline": "dit",
+    "StableDiffusion3Pipeline": "dit",
+    "StableDiffusion3Img2ImgPipeline": "dit",
+    "FluxPipeline": "dit",
+    "FluxImg2ImgPipeline": "dit",
+    "LuminaPipeline": "dit",
+    "AuraFlowPipeline": "dit",
 }
 
 # Known repos for quick architecture lookup (avoids reading model_index.json
@@ -63,6 +75,10 @@ _CLASS_TO_ARCH = {
 _KNOWN_ARCH_HINTS = {
     "sdxl": ("sdxl", "stable-diffusion-xl", "sd-xl", "sdxl-turbo", "juggernaut-xl"),
     "sd15": ("stable-diffusion-v1-5", "sd-v1-5", "sd15", "dreamshaper", "deliberate"),
+    "dit": (
+        "pixart", "sana", "stable-diffusion-3", "sd3", "flux", "lumina",
+        "auraflow",
+    ),
 }
 
 
@@ -250,6 +266,13 @@ def _detect_pipeline_class(repo_id: str) -> str:
         # Diffusers may store the class name directly.
         if cls_name.startswith("StableDiffusion"):
             return cls_name
+        # DiT pipeline classes are returned verbatim if diffusers knows them.
+        if cls_name in {
+            "PixArtAlphaPipeline", "PixArtSigmaPipeline", "SanaPipeline",
+            "StableDiffusion3Pipeline", "FluxPipeline", "LuminaPipeline",
+            "AuraFlowPipeline",
+        }:
+            return cls_name
     except Exception:
         pass  # not available / offline — fall through to heuristics
 
@@ -259,6 +282,21 @@ def _detect_pipeline_class(repo_id: str) -> str:
         return "StableDiffusionXLPipeline"
     if any(h in lower for h in _KNOWN_ARCH_HINTS["sd15"]):
         return "StableDiffusionPipeline"
+    # DiT families — pick the matching pipeline class by keyword.
+    if "pixart" in lower and "sigma" in lower:
+        return "PixArtSigmaPipeline"
+    if "pixart" in lower:
+        return "PixArtAlphaPipeline"
+    if "sana" in lower:
+        return "SanaPipeline"
+    if "stable-diffusion-3" in lower or "sd3" in lower:
+        return "StableDiffusion3Pipeline"
+    if "flux" in lower:
+        return "FluxPipeline"
+    if "lumina" in lower:
+        return "LuminaPipeline"
+    if "auraflow" in lower:
+        return "AuraFlowPipeline"
 
     logger.info("Could not auto-detect pipeline class for %s; defaulting to SDXL", repo_id)
     return "StableDiffusionXLPipeline"
@@ -269,7 +307,7 @@ def _detect_pipeline_class(repo_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 def infer_arch(model_path: str) -> str:
-    """Detect the architecture tag (``sdxl`` / ``sd15``) from a model dir.
+    """Detect the architecture tag (``sdxl`` / ``sd15`` / ``dit``) from a dir.
 
     Reads ``model_index.json`` and maps the pipeline class.  Falls back to
     ``"sdxl"`` if detection fails.
@@ -294,6 +332,8 @@ def infer_arch(model_path: str) -> str:
     lower = (model_path or "").lower()
     if any(h in lower for h in _KNOWN_ARCH_HINTS["sd15"]):
         return "sd15"
+    if any(h in lower for h in _KNOWN_ARCH_HINTS["dit"]):
+        return "dit"
     return "sdxl"
 
 

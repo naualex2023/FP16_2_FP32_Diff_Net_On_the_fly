@@ -460,3 +460,47 @@ def cached_single_gpu_pipeline(
         )
 
     return cache.get_or_load(key, _factory)
+
+
+def cached_dit_pipeline(
+    model_path: str,
+    device_down: str,
+    device_up: str,
+    use_fp32: bool = True,
+    scheduler: str = "default",
+    cache: Optional[PipelineCache] = None,
+) -> Tuple[Any, Optional[_CacheEntry]]:
+    """Return a (possibly cached) DiT pipeline-parallel object.
+
+    DiT-based models (PixArt, Sana, SD3, Flux, …) use a Transformer backbone
+    instead of a UNet; in FP32 they reach 30–50 GB and are split across two
+    GPUs by :class:`pp_dit.PipelineParallelDiT`.  The cache key is distinct
+    from the SDXL/SD15/single keys (prefix ``"dit"``), so a model used in both
+    split and single-GPU modes keeps separate resident entries.  The
+    ``model_path`` is normalised via :mod:`model_resolver` so a repo ID and its
+    downloaded local copy share one cache entry.
+    """
+    from model_resolver import resolve_model_path
+
+    cache = cache or get_cache()
+    resolved_path = resolve_model_path(model_path)
+    key = (
+        "dit",
+        os.path.abspath(resolved_path),
+        str(device_down),
+        str(device_up),
+        bool(use_fp32),
+        str(scheduler),
+    )
+
+    def _factory():
+        from pipeline_parallel_dit import create_dit_pipeline_parallel
+        return create_dit_pipeline_parallel(
+            model_path=resolved_path,
+            device_down=device_down,
+            device_up=device_up,
+            use_fp32=use_fp32,
+            scheduler=scheduler,
+        )
+
+    return cache.get_or_load(key, _factory)
