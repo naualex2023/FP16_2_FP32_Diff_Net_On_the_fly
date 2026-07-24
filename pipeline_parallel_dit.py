@@ -44,23 +44,84 @@ _DIT_PIPELINE_CLASSES: tuple[str, ...] = (
 )
 
 
+def _detect_dit_class_by_structure(model_path: str) -> Optional[str]:
+    """Detect the DiT pipeline class by inspecting the model directory structure.
+
+    When a DiT model was downloaded through a non-DiT pipeline class (e.g. the
+    gated-repo fallback to ``StableDiffusionXLPipeline``), its
+    ``model_index.json`` carries the WRONG ``_class_name``.  We recover the
+    correct class by looking at which sub-directories exist.
+
+    Heuristics (based on the components each diffusers DiT family ships):
+        - 3 text encoders + transformer      → StableDiffusion3Pipeline
+        - 2 text encoders + transformer      → FluxPipeline
+        - 1 text encoder + transformer       → PixArtAlphaPipeline
+          (Sana/Lumina/AuraFlow also have 1 TE; PixArt-α is the safe default)
+    """
+    import os as _os
+
+    def _has(name: str) -> bool:
+        sub = _os.path.join(model_path, name)
+        return _os.path.isdir(sub) or _os.path.isfile(sub + ".json")
+
+    if not _has("transformer"):
+        return None  # not a DiT layout at all
+
+    n_encoders = sum(_has(f"text_encoder{i}") for i in ("", "_2", "_3"))
+    if n_encoders >= 3:
+        return "StableDiffusion3Pipeline"
+    if n_encoders == 2:
+        return "FluxPipeline"
+    # 1 text encoder — disambiguate Sana/Lumina/AuraFlow vs PixArt by config.
+    try:
+        import json as _json
+        tc = _os.path.join(model_path, "transformer", "config.json")
+        if _os.path.isfile(tc):
+            with open(tc, "r", encoding="utf-8") as f:
+                cfg = _json.load(f)
+            arch = (cfg.get("arch") or "").lower()
+            if "sana" in arch:
+                return "SanaPipeline"
+            if "lumina" in arch:
+                return "LuminaPipeline"
+            if "auraflow" in arch or "aura_flow" in arch:
+                return "AuraFlowPipeline"
+    except Exception:
+        pass
+    return "PixArtAlphaPipeline"
+
+
 def _load_dit_pipeline_class(model_path: str):
     """Import the right diffusers pipeline class for *model_path*.
 
-    Reads ``model_index.json`` → ``_class_name`` and falls back to
-    ``PixArtAlphaPipeline``.
+    Strategy (in order):
+      1. If the model dir looks like a DiT layout (has ``transformer/``), detect
+         the class from the directory structure.  This is robust against a wrong
+         ``_class_name`` in ``model_index.json`` (which happens when a gated DiT
+         repo was downloaded via the SDXL fallback class).
+      2. Otherwise trust ``model_index.json`` → ``_class_name``.
+      3. Fallback to ``PixArtAlphaPipeline``.
     """
     import json
     import diffusers
 
-    idx_file = os.path.join(model_path, "model_index.json")
-    cls_name = "PixArtAlphaPipeline"
-    if os.path.isfile(idx_file):
-        try:
-            with open(idx_file, "r", encoding="utf-8") as f:
-                cls_name = json.load(f).get("_class_name", cls_name)
-        except Exception:
-            pass
+    # (1) Structure-based detection takes priority for DiT layouts.
+    detected = _detect_dit_class_by_structure(model_path)
+    if detected:
+        cls_name = detected
+    else:
+        # (2) Trust model_index.json.
+        idx_file = os.path.join(model_path, "model_index.json")
+        cls_name = "PixArtAlphaPipeline"
+        if os.path.isfile(idx_file):
+            try:
+                with open(idx_file, "r", encoding="utf-8") as f:
+                    cls_name = json.load(f).get("_class_name", cls_name)
+            except Exception:
+                pass
+        # If model_index.json names a non-DiT class but we got here, default.
+        if cls_name not in _DIT_PIPELINE_CLASSES:
+            cls_name = "PixArtAlphaPipeline"
 
     if not hasattr(diffusers, cls_name):
         raise RuntimeError(
