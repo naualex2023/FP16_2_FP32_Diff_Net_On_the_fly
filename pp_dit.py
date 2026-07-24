@@ -145,6 +145,16 @@ class PipelineParallelDiT(nn.Module):
         self._orig_cls = type(dit).__name__
         self.lora_scale: float = 1.0
 
+        # ---- probe forward signature to filter kwargs at call time ---------
+        # Different DiT architectures (PixArt, SD3, Flux, ...) have different
+        # forward signatures.  We only pass kwargs the original accepts.
+        import inspect as _inspect
+        try:
+            _sig = _inspect.signature(dit.forward)
+            self._fwd_params = set(_sig.parameters.keys())
+        except (ValueError, TypeError):
+            self._fwd_params = None  # pass everything (fallback)
+
         # ---- install device-transfer hooks ---------------------------------
         self._install_hooks()
 
@@ -282,7 +292,10 @@ class PipelineParallelDiT(nn.Module):
         if cross_attention_kwargs is not None:
             cross_attention_kwargs = _move(cross_attention_kwargs, home)
 
-        out = self._dit(
+        # Build the call dict, then filter to only kwargs the original
+        # transformer forward() actually accepts. Different architectures
+        # (PixArt, SD3, Flux, Sana, ...) have different signatures.
+        fwd_kwargs = dict(
             hidden_states=hidden_states,
             timestep=timestep,
             encoder_hidden_states=encoder_hidden_states,
@@ -294,6 +307,13 @@ class PipelineParallelDiT(nn.Module):
             return_dict=return_dict,
             **kwargs,
         )
+        if self._fwd_params is not None:
+            fwd_kwargs = {
+                k: v for k, v in fwd_kwargs.items()
+                if k in self._fwd_params
+            }
+
+        out = self._dit(**fwd_kwargs)
 
         if isinstance(out, torch.Tensor):
             return out.to(home)
