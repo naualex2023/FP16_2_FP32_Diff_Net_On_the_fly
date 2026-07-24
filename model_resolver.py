@@ -44,6 +44,22 @@ logger = logging.getLogger(__name__)
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 MODELS_DIR = os.environ.get("SD_MODELS_DIR", os.path.join(BASE_DIR, "models"))
 
+
+def resolve_hf_token(token: Optional[str] = None) -> Optional[str]:
+    """Resolve a HuggingFace access token for gated repos (SD3.5, FLUX, ...).
+
+    Priority: explicit *token* arg > env ``HF_TOKEN`` >
+    ``HUGGING_FACE_HUB_TOKEN``.  Returns ``None`` if no token is available
+    (non-gated models work without one).
+    """
+    if token:
+        return token
+    return (
+        os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or None
+    )
+
 # A repo ID is ``org/name`` (or just ``name``) with no path separators beyond
 # the single slash.  We reject anything that looks like a filesystem path
 # (starts with ``.``, ``/``, ``~``, or contains backslashes on Windows).
@@ -134,6 +150,7 @@ def resolve_model_path(
     dtype: str = "float16",
     pipeline_class: Optional[str] = None,
     force_download: bool = False,
+    token: Optional[str] = None,
 ) -> str:
     """Resolve *model_spec* to a local model directory.
 
@@ -174,6 +191,7 @@ def resolve_model_path(
             dtype=dtype,
             pipeline_class=pipeline_class,
             force=force_download,
+            token=token,
         )
 
     # Not a directory and not a recognised repo ID — let diffusers handle it
@@ -197,6 +215,7 @@ def download_hf_model(
     dtype: str = "float16",
     pipeline_class: Optional[str] = None,
     force: bool = False,
+    token: Optional[str] = None,
 ) -> str:
     """Download a HuggingFace diffusers repo into a local directory.
 
@@ -237,10 +256,11 @@ def download_hf_model(
     os.makedirs(models_dir, exist_ok=True)
     logger.info("Downloading %s → %s (%s)", repo_id, dst, dtype)
 
-    cls_name = pipeline_class or _detect_pipeline_class(repo_id)
+    cls_name = pipeline_class or _detect_pipeline_class(repo_id, token=token)
     cls = getattr(diffusers, cls_name)
     torch_dtype = getattr(torch, dtype)
-    pipe = cls.from_pretrained(repo_id, torch_dtype=torch_dtype)
+    hf_token = resolve_hf_token(token)
+    pipe = cls.from_pretrained(repo_id, torch_dtype=torch_dtype, token=hf_token)
     pipe.save_pretrained(dst)
     logger.info("Downloaded %s → %s", repo_id, dst)
 
@@ -255,7 +275,7 @@ def download_hf_model(
     return os.path.abspath(dst)
 
 
-def _detect_pipeline_class(repo_id: str) -> str:
+def _detect_pipeline_class(repo_id: str, token: Optional[str] = None) -> str:
     """Best-effort detection of the diffusers pipeline class for *repo_id*.
 
     Checks the repo's ``model_index.json`` for a ``_class_name`` field.
@@ -266,7 +286,9 @@ def _detect_pipeline_class(repo_id: str) -> str:
     try:
         from huggingface_hub import hf_hub_download
 
-        idx_path = hf_hub_download(repo_id, "model_index.json")
+        idx_path = hf_hub_download(
+            repo_id, "model_index.json", token=resolve_hf_token(token)
+        )
         with open(idx_path, "r", encoding="utf-8") as f:
             idx = json.load(f)
         cls_name = idx.get("_class_name", "")

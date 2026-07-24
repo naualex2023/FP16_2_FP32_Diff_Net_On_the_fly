@@ -65,7 +65,7 @@ def download(name: str, force: bool = False) -> None:
 
     cls = getattr(diffusers, info["class"])
     dtype = getattr(torch, info["dtype"])
-    pipe = cls.from_pretrained(info["repo"], torch_dtype=dtype)
+    pipe = cls.from_pretrained(info["repo"], torch_dtype=dtype, token=args.hf_token)
     pipe.save_pretrained(dst)
     logger.info("[%s] done.", name)
 
@@ -102,6 +102,12 @@ def main():
     )
     ap.add_argument("--dtype", default="float16", choices=["float16", "float32"])
     ap.add_argument("--force", action="store_true")
+    ap.add_argument(
+        "--hf-token",
+        default=None,
+        help="HuggingFace access token for gated repos (SD3.5/FLUX). "
+        "Also read from HF_TOKEN / HUGGING_FACE_HUB_TOKEN env vars.",
+    )
     args = ap.parse_args()
 
     if args.repo:
@@ -112,6 +118,7 @@ def main():
             dtype=args.dtype,
             pipeline_class=args.pipeline_class,
             force=args.force,
+            token=args.hf_token,
         )
         arch = infer_arch(path)
         logger.info("OK: %s -> %s (arch=%s)", args.repo, path, arch)

@@ -76,6 +76,7 @@ def create_dit_pipeline_parallel(
     device_up: str = "cuda:1",
     use_fp32: bool = True,
     scheduler: str = "default",
+    token: Optional[str] = None,
 ):
     """Build a 2-GPU pipeline-parallel DiT pipeline.
 
@@ -92,12 +93,12 @@ def create_dit_pipeline_parallel(
     """
     from model_resolver import resolve_model_path
 
-    model_path = resolve_model_path(model_path)
+    model_path = resolve_model_path(model_path, token=token)
     dtype = torch.float32 if use_fp32 else torch.float16
     logger.info("Loading DiT from %s (%s)", model_path, "FP32" if use_fp32 else "FP16")
 
     pipe_cls = _load_dit_pipeline_class(model_path)
-    pipe = pipe_cls.from_pretrained(model_path, torch_dtype=dtype)
+    pipe = pipe_cls.from_pretrained(model_path, torch_dtype=dtype, token=token)
 
     # Place text encoders + VAE on stage 0 (device_down).  These are small
     # relative to a 30–50 GB transformer.

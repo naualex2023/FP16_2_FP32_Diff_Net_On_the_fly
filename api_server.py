@@ -224,6 +224,11 @@ class DownloadModelRequest(BaseModel):
     )
     dtype: str = Field("float16", description="'float16' (compact) or 'float32'")
     force: bool = Field(False, description="Re-download even if already present")
+    hf_token: Optional[str] = Field(
+        None,
+        description="HuggingFace access token for gated repos (SD3.5/FLUX). "
+        "Also read from HF_TOKEN / HUGGING_FACE_HUB_TOKEN env vars.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1016,6 +1021,7 @@ async def api_download_model(req: DownloadModelRequest):
                 dtype=req.dtype,
                 pipeline_class=req.pipeline_class,
                 force=req.force,
+                token=req.hf_token,
             ),
         )
         arch = infer_arch(path)
