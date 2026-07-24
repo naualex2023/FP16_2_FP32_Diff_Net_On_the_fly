@@ -168,6 +168,61 @@ def _load_dit_pipeline_class(model_path: str):
     return getattr(diffusers, cls_name)
 
 
+def _compute_split_ratio(pipe, device_down: str, device_up: str) -> float:
+    """Compute the optimal transformer-block split ratio from live VRAM.
+
+    Measures:
+      - How much VRAM is already used on each GPU (by text encoders / VAE).
+      - The transformer's actual parameter memory footprint.
+    Then splits blocks so that both GPUs stay under ~90 % VRAM.
+
+    Returns a float in (0, 1): fraction of blocks for *device_down*.
+    """
+    import torch
+
+    dev_down = torch.device(device_down)
+    dev_up = torch.device(device_up)
+
+    def _param_bytes(module) -> int:
+        return sum(p.numel() * p.element_size() for p in module.parameters())
+
+    def _free_vram_gb(device: torch.device) -> float:
+        try:
+            total = torch.cuda.get_device_properties(device).total_memory
+            allocated = torch.cuda.memory_allocated(device)
+            return max((total - allocated) / 1e9, 0.5)
+        except Exception:
+            return 20.0  # fallback assumption
+
+    # Transformer size in GB.
+    transformer_gb = _param_bytes(pipe.transformer) / 1e9
+
+    # Free VRAM on each GPU after text encoders / VAE / T5 are placed.
+    free_down = _free_vram_gb(dev_down)
+    free_up = _free_vram_gb(dev_up)
+
+    # Reserve 15 % headroom on each GPU for activations during forward pass.
+    usable_down = free_down * 0.85
+    usable_up = free_up * 0.85
+
+    # How many GB of transformer blocks can each GPU hold?
+    total_usable = usable_down + usable_up
+    if total_usable <= 0 or transformer_gb <= 0:
+        logger.warning("Could not compute split ratio; defaulting to 0.5")
+        return 0.5
+
+    ratio = usable_down / total_usable
+    # Clamp to reasonable bounds.
+    ratio = max(0.3, min(0.8, ratio))
+
+    logger.info(
+        "Dynamic split: transformer=%.1f GB, free_down=%.1f GB, free_up=%.1f GB, "
+        "ratio=%.2f (%.0f%% down / %.0f%% up)",
+        transformer_gb, free_down, free_up, ratio, ratio * 100, (1 - ratio) * 100,
+    )
+    return ratio
+
+
 def create_dit_pipeline_parallel(
     model_path: str = "PixArt-alpha/PixArt-XL-2-1024-MS",
     device_down: str = "cuda:0",
@@ -246,12 +301,12 @@ def create_dit_pipeline_parallel(
         "Wrapping %s with PipelineParallelDiT (%s + %s)",
         type(pipe.transformer).__name__, device_down, device_up,
     )
-    # If text_encoder_3 (T5-XXL) lives on device_up, give device_down more
-    # transformer blocks to balance memory (T5 occupies ~10 GB on device_up).
-    split_ratio = 0.5
-    te3 = getattr(pipe, "text_encoder_3", None)
-    if te3 is not None:
-        split_ratio = 0.65  # 65% blocks on device_down, 35% on device_up
+    # Dynamically compute split_ratio based on actual model size and free VRAM.
+    # SD3.5-large transformer is ~32 GB in FP32 — a naive 50/50 split OOMs both
+    # GPUs because device_up also carries T5-XXL (~10 GB) and device_down
+    # carries CLIP-L + CLIP-G + VAE (~2 GB).  We measure the transformer's real
+    # footprint and the free VRAM on each GPU, then split proportionally.
+    split_ratio = _compute_split_ratio(pipe, device_down, device_up)
 
     pipe.transformer = PipelineParallelDiT(
         pipe.transformer, device_down=device_down, device_up=device_up,
