@@ -65,6 +65,7 @@ class PipelineParallelDiT(nn.Module):
         device_up: str = "cuda:1",
         devices: Optional[List[str]] = None,
         split_ratio: float = 0.5,
+        chunk_sizes: Optional[List[int]] = None,
     ) -> None:
         super().__init__()
 
@@ -95,7 +96,19 @@ class PipelineParallelDiT(nn.Module):
         n_blocks = len(blocks)
 
         # ---- compute chunk sizes -------------------------------------------
-        if self.n_stages == 2 and not devices and split_ratio != 0.5:
+        if chunk_sizes is not None:
+            # Explicit caller-supplied distribution (budget-aware placement).
+            if len(chunk_sizes) != self.n_stages:
+                raise ValueError(
+                    f"chunk_sizes (len {len(chunk_sizes)}) must match number "
+                    f"of devices ({self.n_stages})."
+                )
+            if sum(chunk_sizes) != n_blocks:
+                raise ValueError(
+                    f"chunk_sizes sum to {sum(chunk_sizes)} but transformer "
+                    f"has {n_blocks} blocks."
+                )
+        elif self.n_stages == 2 and not devices and split_ratio != 0.5:
             # Legacy 2-GPU with custom ratio.
             split_idx = int(n_blocks * split_ratio)
             chunk_sizes = [split_idx, n_blocks - split_idx]

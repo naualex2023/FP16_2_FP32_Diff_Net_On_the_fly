@@ -25,8 +25,31 @@ from typing import List, Optional
 import torch
 
 from pp_dit import PipelineParallelDiT
+from pp_t5 import PipelineParallelT5
+from dit_placement_planner import plan_placement, PlacementPlan
 
 logger = logging.getLogger(__name__)
+
+
+def _read_num_blocks(model_path: str, component: str, config_keys: tuple[str, ...]) -> int:
+    """Read a block count from a component's ``config.json``.
+
+    Tries each key in *config_keys* in turn; returns 0 if none found.
+    """
+    import json
+    cfg_path = os.path.join(model_path, component, "config.json")
+    if not os.path.isfile(cfg_path):
+        return 0
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return 0
+    for key in config_keys:
+        val = cfg.get(key)
+        if isinstance(val, int) and val > 0:
+            return val
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -227,30 +250,75 @@ def create_dit_pipeline_parallel(
         num_gpus, devices, model_gb, "FP32" if use_fp32 else "FP16",
     )
 
+    # ---- estimate per-component sizes for budget-aware placement --------
+    target_dtype = "float32" if use_fp32 else "float16"
+    component_sizes = _estimate_model_size_gb(model_path, target_dtype=target_dtype) or {}
+
+    # ---- read block counts from config.json ----------------------------
+    n_tx_blocks = _read_num_blocks(
+        model_path, "transformer",
+        ("num_layers", "num_hidden_layers", "num_blocks"),
+    )
+    n_t5_blocks = _read_num_blocks(
+        model_path, "text_encoder_3",
+        ("num_layers", "num_decoder_layers"),
+    )
+    vram_per_gpu = (
+        torch.cuda.get_device_properties(0).total_memory / 1e9
+        if torch.cuda.is_available() else 24.0
+    )
+
+    # ---- compute the budget-aware placement plan -----------------------
+    plan: PlacementPlan = plan_placement(
+        component_sizes=component_sizes,
+        n_transformer_blocks=n_tx_blocks,
+        devices=devices,
+        vram_gb=vram_per_gpu,
+        margin_gb=3.0,
+        n_t5_blocks=n_t5_blocks if n_t5_blocks > 0 else None,
+    )
+
+    # Log the full allocation table so placement is auditable.
+    logger.info(
+        "Placement plan (%.0f GB/GPU, %.0f GB margin):\n%s",
+        vram_per_gpu, 3.0, plan.describe(devices),
+    )
+
+    # ---- load the pipeline to CPU, then place per the plan -------------
     pipe_cls = _load_dit_pipeline_class(model_path)
     pipe = pipe_cls.from_pretrained(model_path, torch_dtype=dtype, token=token)
 
-    # ---- place components across GPUs ----------------------------------
-    # Strategy: text encoders on device[0], but T5-XXL (if present) on the
-    # LAST device (it has the fewest transformer blocks → more room).
-    # VAE on device[0] (needed at the end for decode).
+    # ---- place small components (TE, TE2, VAE) on GPU 0 ----------------
     home_dev = torch.device(devices[0])
-    last_dev = torch.device(devices[-1])
-
     for attr in ("text_encoder", "text_encoder_2", "vae"):
         sub = getattr(pipe, attr, None)
         if sub is not None:
             sub.to(home_dev)
 
-    # T5-XXL on the last GPU with relay hooks.
+    # ---- place T5-XXL: shard if multi-GPU, else single + relay ---------
     te3 = getattr(pipe, "text_encoder_3", None)
     if te3 is not None:
-        if num_gpus > 1:
-            te3.to(last_dev)
-            _install_device_relay(te3, last_dev, home_dev)
-            logger.info("text_encoder_3 on %s with relay → %s", last_dev, home_dev)
+        if len(plan.t5_devices) > 1:
+            # Shard T5 across multiple GPUs.
+            t5_device_strs = [devices[gi] for gi in plan.t5_devices]
+            logger.info(
+                "Sharding text_encoder_3 across %d GPUs: %s (blocks %s)",
+                len(plan.t5_devices), t5_device_strs, plan.t5_chunk_sizes,
+            )
+            pipe.text_encoder_3 = PipelineParallelT5(
+                te3,
+                devices=t5_device_strs,
+                chunk_sizes=plan.t5_chunk_sizes,
+            )
         else:
-            te3.to(home_dev)
+            # Single-GPU placement with relay hooks back to home.
+            t5_dev = torch.device(devices[plan.t5_devices[0]])
+            te3.to(t5_dev)
+            if t5_dev != home_dev:
+                _install_device_relay(te3, t5_dev, home_dev)
+                logger.info("text_encoder_3 on %s with relay → %s", t5_dev, home_dev)
+            else:
+                logger.info("text_encoder_3 on %s", t5_dev)
 
     if getattr(pipe, "safety_checker", None) is not None:
         pipe.safety_checker = None
@@ -268,13 +336,17 @@ def create_dit_pipeline_parallel(
         except Exception:
             logger.warning("Could not switch scheduler to %s; keeping default", scheduler)
 
-    # ---- wrap transformer across N GPUs --------------------------------
+    # ---- wrap transformer across the planned GPUs ----------------------
+    tx_device_strs = [devices[gi] for gi in plan.transformer_devices]
     logger.info(
-        "Wrapping %s with PipelineParallelDiT (%d GPUs: %s)",
-        type(pipe.transformer).__name__, num_gpus, devices,
+        "Wrapping %s with PipelineParallelDiT (%d GPUs: %s, blocks %s)",
+        type(pipe.transformer).__name__,
+        len(tx_device_strs), tx_device_strs, plan.transformer_chunk_sizes,
     )
     pipe.transformer = PipelineParallelDiT(
-        pipe.transformer, devices=devices,
+        pipe.transformer,
+        devices=tx_device_strs,
+        chunk_sizes=plan.transformer_chunk_sizes,
     )
 
     pipe.enable_model_cpu_offload = lambda: None
