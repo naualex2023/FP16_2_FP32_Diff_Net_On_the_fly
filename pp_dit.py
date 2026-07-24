@@ -171,19 +171,22 @@ class PipelineParallelDiT(nn.Module):
         )
 
     def _install_hooks(self) -> None:
-        """Register device-transfer hooks between stages.
+        """Register device-transfer hooks on ALL blocks.
 
-        For stage i > 0: a forward_pre_hook moves inputs to devices[i].
-        For the last stage: a forward_hook moves output back to devices[0].
+        Every block gets a pre-hook that moves ALL its inputs (args + kwargs,
+        including temb, encoder_hidden_states, etc.) to that block device.
+        This ensures correctness even when the model forward loop passes
+        shared tensors (like temb) to every block from the enclosing scope.
+
+        The last block of the last stage gets a post-hook to return output home.
         """
         if self.n_stages <= 1:
             return
 
         devices = self.devices
-        last_device = devices[-1]
         home_device = devices[0]
 
-        for stage_idx in range(1, self.n_stages):
+        for stage_idx in range(self.n_stages):
             target = devices[stage_idx]
             stage_blocks = self.stage_layers[stage_idx]
 
@@ -194,12 +197,11 @@ class PipelineParallelDiT(nn.Module):
                     return new_args, new_kwargs
                 return _pre
 
-            # Register pre-hook on first block of this stage.
-            first_blk = stage_blocks[0]
-            first_blk.register_forward_pre_hook(_make_pre(target), with_kwargs=True)
+            # Register pre-hook on EVERY block in this stage.
+            for blk in stage_blocks:
+                blk.register_forward_pre_hook(_make_pre(target), with_kwargs=True)
 
-            # If this is the last stage, register post-hook on its last block
-            # to bring output back home.
+            # Post-hook on the last block of the last stage: return home.
             if stage_idx == self.n_stages - 1:
                 last_blk = stage_blocks[-1]
 
