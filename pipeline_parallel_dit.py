@@ -401,7 +401,13 @@ def generate_dit(
 
     if callback is not None:
         from callback_utils import make_progress_callback
-        call_kwargs["callback_on_step_end"] = make_progress_callback(callback)
+        # Wrap the user callback so we also touch the cache entry on each
+        # step, preventing the idle reaper from evicting during long runs.
+        def _touch_callback(step, timestep, kwargs):
+            if entry is not None:
+                entry.touch()
+            return callback(step, timestep, kwargs)
+        call_kwargs["callback_on_step_end"] = make_progress_callback(_touch_callback)
         # Not all diffusers pipelines accept callback_on_step_end_inputs
         # (e.g. StableDiffusion3Pipeline). Probe the signature.
         import inspect

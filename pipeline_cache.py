@@ -268,11 +268,20 @@ class PipelineCache:
     def _reap_once(self) -> None:
         now = time.monotonic()
         with self._registry_lock:
-            expired = [
-                (key, entry)
-                for key, entry in self._entries.items()
-                if now - entry.last_used > self.idle_timeout
-            ]
+            expired = []
+            for key, entry in self._entries.items():
+                if now - entry.last_used <= self.idle_timeout:
+                    continue
+                # Don't evict entries that are currently in use (generation
+                # in progress). The lock is held during pipe(**call_kwargs).
+                if entry.lock.acquire(blocking=False):
+                    entry.lock.release()
+                    expired.append((key, entry))
+                else:
+                    logger.info(
+                        "Skipping busy entry (generation in progress): %s",
+                        self._safe_key(key),
+                    )
             for key, _ in expired:
                 self._entries.pop(key, None)
         for key, entry in expired:
