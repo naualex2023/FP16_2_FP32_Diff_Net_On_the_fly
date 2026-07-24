@@ -133,9 +133,14 @@ class PipelineParallelDiT(nn.Module):
         self.first_half_layers = self.stage_layers[0] if self.n_stages >= 1 else nn.ModuleList()
         self.second_half_layers = self.stage_layers[1] if self.n_stages >= 2 else nn.ModuleList()
 
-        # ---- place input/output modules (light) on devices[0] --------------
-        for name in _INPUT_MODULES + _OUTPUT_MODULES:
-            mod = getattr(dit, name, None)
+        # ---- place ALL non-block modules on devices[0] (home) ------------
+        # Different architectures (PixArt, SD3, Flux, ...) use different
+        # module names (time_text_embed, pos_embed, time_embed, etc.).
+        # Instead of maintaining a hardcoded list, move every child module
+        # that is NOT the block sequence to devices[0].
+        for name, mod in dit.named_children():
+            if name == self._blocks_attr:
+                continue  # blocks are already placed on their stages
             if isinstance(mod, nn.Module):
                 mod.to(self.devices[0])
                 setattr(self, name, mod)
