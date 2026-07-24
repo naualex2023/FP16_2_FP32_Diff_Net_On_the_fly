@@ -246,8 +246,16 @@ def create_dit_pipeline_parallel(
         "Wrapping %s with PipelineParallelDiT (%s + %s)",
         type(pipe.transformer).__name__, device_down, device_up,
     )
+    # If text_encoder_3 (T5-XXL) lives on device_up, give device_down more
+    # transformer blocks to balance memory (T5 occupies ~10 GB on device_up).
+    split_ratio = 0.5
+    te3 = getattr(pipe, "text_encoder_3", None)
+    if te3 is not None:
+        split_ratio = 0.65  # 65% blocks on device_down, 35% on device_up
+
     pipe.transformer = PipelineParallelDiT(
-        pipe.transformer, device_down=device_down, device_up=device_up
+        pipe.transformer, device_down=device_down, device_up=device_up,
+        split_ratio=split_ratio,
     )
 
     # The pipeline must not attempt its own device management.

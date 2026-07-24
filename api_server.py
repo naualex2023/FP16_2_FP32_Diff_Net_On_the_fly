@@ -364,11 +364,11 @@ def _run_single_generation(
             stage="generating",
         )
 
+    out_path = os.path.join(OUTPUT_DIR, f"{job_id}.png")
     try:
         if req.arch == "sd15":
             from pipeline_parallel_sd15 import generate_sd15_pipeline_parallel
 
-            out_path = os.path.join(OUTPUT_DIR, f"{job_id}.png")
             generate_sd15_pipeline_parallel(
                 prompt=req.prompt,
                 negative_prompt=req.negative_prompt,

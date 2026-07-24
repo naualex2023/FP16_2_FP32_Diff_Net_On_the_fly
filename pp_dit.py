@@ -107,6 +107,7 @@ class PipelineParallelDiT(nn.Module):
         dit: nn.Module,
         device_down: str = "cuda:0",
         device_up: str = "cuda:1",
+        split_ratio: float = 0.5,
     ) -> None:
         super().__init__()
 
@@ -133,12 +134,12 @@ class PipelineParallelDiT(nn.Module):
                 f"'blocks' ModuleList to split."
             )
 
-        half = len(blocks) // 2  # user-specified split point
+        split_idx = int(len(blocks) * split_ratio)  # configurable split point
         self.first_half_layers = nn.ModuleList(
-            [blk.to(self.device_down) for blk in blocks[:half]]
+            [blk.to(self.device_down) for blk in blocks[:split_idx]]
         )
         self.second_half_layers = nn.ModuleList(
-            [blk.to(self.device_up) for blk in blocks[half:]]
+            [blk.to(self.device_up) for blk in blocks[split_idx:]]
         )
 
         # ---- place input/output modules (light) on device_down -------------
@@ -164,12 +165,13 @@ class PipelineParallelDiT(nn.Module):
         self._install_hooks()
 
         logger.info(
-            "PipelineParallelDiT created: orig=%s, blocks=%d (split %d + %d), "
+            "PipelineParallelDiT created: orig=%s, blocks=%d (split %d + %d, ratio=%.2f), "
             "stage0=%s, stage1=%s",
             self._orig_cls,
             len(blocks),
-            half,
-            len(blocks) - half,
+            split_idx,
+            len(blocks) - split_idx,
+            split_ratio,
             self.device_down,
             self.device_up,
         )
