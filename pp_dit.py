@@ -297,6 +297,11 @@ class PipelineParallelDiT(nn.Module):
         if cross_attention_kwargs is not None:
             cross_attention_kwargs = _move(cross_attention_kwargs, home)
 
+        # Move any extra tensor kwargs (e.g. SD3 pooled_projections) to home.
+        if kwargs:
+            kwargs = {k: (_move(v, home) if isinstance(v, torch.Tensor) else v)
+                      for k, v in kwargs.items()}
+
         # Build the call dict, then filter to only kwargs the original
         # transformer forward() actually accepts. Different architectures
         # (PixArt, SD3, Flux, Sana, ...) have different signatures.
