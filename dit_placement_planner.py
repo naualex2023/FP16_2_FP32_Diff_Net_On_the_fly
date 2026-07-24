@@ -54,7 +54,7 @@ class PlacementPlan:
                     parts.append(comp)
             if gpu_idx in self.t5_devices:
                 ti = self.t5_devices.index(gpu_idx)
-                parts.append(f"t5[{self.t5_chunk_sizes[ti]} blocks]")
+                parts.append(f"text_encoder_3[{self.t5_chunk_sizes[ti]} blocks]")
             if gpu_idx in self.transformer_devices:
                 xi = self.transformer_devices.index(gpu_idx)
                 parts.append(f"transformer[{self.transformer_chunk_sizes[xi]} blocks]")
