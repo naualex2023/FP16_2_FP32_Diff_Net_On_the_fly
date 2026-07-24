@@ -106,6 +106,7 @@ export default function Controls({ params, setParams, models = [], loras = [], o
           <select id="arch" value={params.arch} onChange={(e) => set("arch", e.target.value)}>
             <option value="sdxl">SDXL (UNet)</option>
             <option value="dit">DiT (PixArt/Sana/SD3/Flux)</option>
+            <option value="gguf">GGUF (quantized, 1 GPU)</option>
             <option value="sd15">SD 1.5 (UNet)</option>
           </select>
         </div>

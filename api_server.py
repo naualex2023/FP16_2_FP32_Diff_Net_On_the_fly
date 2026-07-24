@@ -126,7 +126,7 @@ JOBS = JobManager()
 # Pydantic models (request bodies)
 # ---------------------------------------------------------------------------
 
-ARCH_CHOICES = ["sdxl", "sd15", "dit"]
+ARCH_CHOICES = ["sdxl", "sd15", "dit", "gguf"]
 SCHEDULER_CHOICES = ["default", "ddim", "euler", "dpmpp_2m"]
 ASPECT_PRESETS = ["1:1", "3:4", "4:3", "16:9", "9:16", "2:3", "3:2"]
 
@@ -398,6 +398,25 @@ def _run_single_generation(
                 seed=seed,
                 guidance_scale=req.guidance_scale,
                 use_fp32=req.use_fp32,
+                output_path=out_path,
+                scheduler=req.scheduler,
+                callback=cb,
+            )
+        elif req.arch == "gguf":
+            from pipeline_gguf import generate_gguf
+
+            dev = "cuda:0" if req.gpu_pair == "0+1" else "cuda:2"
+            generate_gguf(
+                prompt=req.prompt,
+                negative_prompt=req.negative_prompt,
+                model_path=req.model_path,
+                device=dev,
+                steps=req.steps,
+                width=req.width,
+                height=req.height,
+                seed=seed,
+                guidance_scale=req.guidance_scale,
+                use_fp16_compute=True,
                 output_path=out_path,
                 scheduler=req.scheduler,
                 callback=cb,
@@ -731,10 +750,29 @@ def _run_quadro_generation(job_id: str, req: QuadroRequest) -> None:
 
     def work(label: str, device: str):
         try:
-            from pipeline_single_gpu import generate_single_gpu
-
             out_path = os.path.join(OUTPUT_DIR, f"{job_id}_{label}.png")
-            generate_single_gpu(
+            if req.arch == "gguf":
+                from pipeline_gguf import generate_gguf
+
+                generate_gguf(
+                    prompt=req.prompt,
+                    negative_prompt=req.negative_prompt,
+                    model_path=req.model_path,
+                    device=device,
+                    steps=req.steps,
+                    width=req.width,
+                    height=req.height,
+                    seed=seeds[label],
+                    guidance_scale=req.guidance_scale,
+                    use_fp16_compute=True,
+                    output_path=out_path,
+                    scheduler=req.scheduler,
+                    callback=make_cb(label),
+                )
+            else:
+                from pipeline_single_gpu import generate_single_gpu
+
+                generate_single_gpu(
                 prompt=req.prompt,
                 negative_prompt=req.negative_prompt,
                 model_path=req.model_path,
@@ -850,8 +888,6 @@ def _run_batch_generation(job_id: str, req: BatchRequest) -> None:
 
     def worker(device: str):
         """Pull jobs from the shared queue until exhausted."""
-        from pipeline_single_gpu import generate_single_gpu
-
         while True:
             with queue_lock:
                 if next_idx[0] >= len(work_queue):
@@ -874,7 +910,28 @@ def _run_batch_generation(job_id: str, req: BatchRequest) -> None:
                 )
 
             try:
-                generate_single_gpu(
+                if req.arch == "gguf":
+                    from pipeline_gguf import generate_gguf
+
+                    generate_gguf(
+                        prompt=prompt,
+                        negative_prompt=req.negative_prompt,
+                        model_path=req.model_path,
+                        device=device,
+                        steps=req.steps,
+                        width=req.width,
+                        height=req.height,
+                        seed=seed,
+                        guidance_scale=req.guidance_scale,
+                        use_fp16_compute=True,
+                        output_path=out_path,
+                        scheduler=req.scheduler,
+                        callback=cb,
+                    )
+                else:
+                    from pipeline_single_gpu import generate_single_gpu
+
+                    generate_single_gpu(
                     prompt=prompt,
                     negative_prompt=req.negative_prompt,
                     model_path=req.model_path,
@@ -1058,6 +1115,7 @@ async def get_config():
         "default_model_sdxl": "./models/sdxl-base-fp16",
         "default_model_sd15": "./models/sd15-fp16",
         "default_model_dit": "PixArt-alpha/PixArt-XL-2-1024-MS",
+        "default_model_gguf": "./models/sd35-large-Q4_K_M.gguf",
         "default_model_turbo": "./models/sdxl-turbo",
         "gpu_pairs": ["0+1", "2+3"],
     }

@@ -468,6 +468,7 @@ def cached_dit_pipeline(
     device_up: str,
     use_fp32: bool = True,
     scheduler: str = "default",
+    num_gpus: Optional[int] = None,
     cache: Optional[PipelineCache] = None,
 ) -> Tuple[Any, Optional[_CacheEntry]]:
     """Return a (possibly cached) DiT pipeline-parallel object.
@@ -491,6 +492,7 @@ def cached_dit_pipeline(
         str(device_up),
         bool(use_fp32),
         str(scheduler),
+        str(num_gpus),
     )
 
     def _factory():
@@ -500,6 +502,42 @@ def cached_dit_pipeline(
             device_down=device_down,
             device_up=device_up,
             use_fp32=use_fp32,
+            scheduler=scheduler,
+            num_gpus=num_gpus,
+        )
+
+    return cache.get_or_load(key, _factory)
+
+
+def cached_gguf_pipeline(
+    model_path: str,
+    device: str = "cuda:0",
+    use_fp16_compute: bool = True,
+    scheduler: str = "default",
+    cache: Optional[PipelineCache] = None,
+) -> Tuple[Any, Optional[_CacheEntry]]:
+    """Return a (possibly cached) GGUF-quantized pipeline object (1 GPU).
+
+    GGUF models (Q4/Q8 quantized) are small enough to fit on a single P40.
+    Used by Generate / Quadro / Batch modes when the user selects the GGUF
+    architecture.  The cache key is prefixed ``"gguf"`` so a quantized model
+    and its full-precision counterpart keep separate resident entries.
+    """
+    cache = cache or get_cache()
+    key = (
+        "gguf",
+        os.path.abspath(model_path),
+        str(device),
+        bool(use_fp16_compute),
+        str(scheduler),
+    )
+
+    def _factory():
+        from pipeline_gguf import create_gguf_pipeline
+        return create_gguf_pipeline(
+            model_path=model_path,
+            device=device,
+            use_fp16_compute=use_fp16_compute,
             scheduler=scheduler,
         )
 

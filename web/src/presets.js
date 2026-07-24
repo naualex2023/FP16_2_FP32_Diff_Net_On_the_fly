@@ -41,6 +41,11 @@ export const QUICK_PRESETS = [
     label: "PixArt-α (DiT)",
     config: { steps: 20, guidance_scale: 4.5, scheduler: "default", arch: "dit" },
   },
+  {
+    id: "gguf-sd3",
+    label: "SD3.5 GGUF (Q4)",
+    config: { steps: 20, guidance_scale: 4.5, scheduler: "default", arch: "gguf" },
+  },
 ];
 
 export const DEFAULT_NEGATIVE =
@@ -49,5 +54,6 @@ export const DEFAULT_NEGATIVE =
 export function defaultModel(arch) {
   if (arch === "sd15") return "./models/sd15-fp16";
   if (arch === "dit") return "PixArt-alpha/PixArt-XL-2-1024-MS";
+  if (arch === "gguf") return "./models/sd35-large-Q4_K_M.gguf";
   return "./models/sdxl-base-fp16";
 }
