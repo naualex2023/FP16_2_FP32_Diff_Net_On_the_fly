@@ -30,61 +30,16 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Model size estimation
+# Model size estimation (pure-Python logic lives in dit_size_estimator)
 # ---------------------------------------------------------------------------
 
-def _estimate_model_size_gb(model_path: str) -> Optional[dict]:
-    """Estimate component sizes (GB) from config.json files on disk.
-
-    Returns a dict like ``{"transformer": 32.0, "text_encoder_3": 18.8, ...}``
-    in **FP32** bytes, or ``None`` if it cannot be determined.
-    """
-    import json
-
-    def _read_config(subdir: str) -> dict:
-        cfg_path = os.path.join(model_path, subdir, "config.json")
-        if not os.path.isfile(cfg_path):
-            return {}
-        try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _estimate_params(config: dict) -> float:
-        """Rough parameter count estimate from common config fields (in billions)."""
-        # Transformer models: estimate from hidden_size, num_layers, etc.
-        hidden = config.get("hidden_size") or config.get("num_attention_heads", 0) * (
-            config.get("attention_head_dim", 0) or config.get("dim", 0)
-        )
-        layers = config.get("num_layers") or config.get("num_hidden_layers", 0)
-        vocab = config.get("vocab_size", 0)
-        intermediate = config.get("intermediate_size") or hidden * 4
-
-        if hidden and layers:
-            # Very rough: each transformer layer ≈ 12 * hidden^2 params
-            layer_params = 12 * hidden * hidden
-            total = layer_params * layers
-            if vocab:
-                total += vocab * hidden * 2  # embeddings + LM head
-            return total / 1e9
-        return 0.0
-
-    sizes = {}
-    for comp in ("transformer", "text_encoder", "text_encoder_2", "text_encoder_3", "vae"):
-        cfg = _read_config(comp)
-        if cfg:
-            params_bn = _estimate_params(cfg)
-            if params_bn > 0:
-                sizes[comp] = params_bn * 4.0  # FP32 = 4 bytes/param → GB
-
-    return sizes if sizes else None
+from dit_size_estimator import estimate_model_size_gb as _estimate_model_size_gb
 
 
 def _auto_detect_num_gpus(model_path: str, use_fp32: bool = True) -> tuple[int, float]:
     """Determine how many GPUs are needed for this model.
 
-    Returns (num_gpus, total_model_gb).
+    Returns ``(num_gpus, total_model_gb)``.
     """
     if not torch.cuda.is_available():
         return 1, 0.0
@@ -92,24 +47,28 @@ def _auto_detect_num_gpus(model_path: str, use_fp32: bool = True) -> tuple[int, 
     n_available = torch.cuda.device_count()
     vram_per_gpu = torch.cuda.get_device_properties(0).total_memory / 1e9  # GB
 
-    sizes = _estimate_model_size_gb(model_path)
+    target_dtype = "float32" if use_fp32 else "float16"
+    sizes = _estimate_model_size_gb(model_path, target_dtype=target_dtype)
     if not sizes:
         logger.warning("Could not estimate model size; defaulting to 2 GPUs")
         return min(2, n_available), 0.0
 
-    byte_factor = 1.0 if use_fp32 else 0.5  # FP16 halves memory
-    total_gb = sum(sizes.values()) * byte_factor
+    total_gb = sum(sizes.values())
 
-    # Reserve ~20% for activations.
+    # Log per-component breakdown so the auto-detect is auditable.
+    breakdown = ", ".join(f"{k}={v:.1f}" for k, v in sorted(sizes.items()))
+    logger.info("Model size (%s): %s — total %.1f GB", target_dtype, breakdown, total_gb)
+
+    # Reserve ~25% for activations / temporaries.
     usable_per_gpu = vram_per_gpu * 0.75
 
     needed = max(1, int(-(-total_gb // usable_per_gpu)))  # ceil division
     needed = min(needed, n_available)
 
     logger.info(
-        "Auto-detect: model components (FP%d) ≈ %.1f GB total, VRAM/GPU=%.1f GB "
+        "Auto-detect: model ≈ %.1f GB total (%s), VRAM/GPU=%.1f GB "
         "→ need %d GPU(s)",
-        32 if use_fp32 else 16, total_gb, vram_per_gpu, needed,
+        total_gb, "FP32" if use_fp32 else "FP16", vram_per_gpu, needed,
     )
     return needed, total_gb
 
