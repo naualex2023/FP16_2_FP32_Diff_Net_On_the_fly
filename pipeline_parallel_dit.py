@@ -388,7 +388,7 @@ def generate_dit(
         resolved = resolve_model_path(model_path)
         key = (
             "dit", os.path.abspath(resolved), str(device_down), str(device_up),
-            bool(use_fp32), str(scheduler),
+            bool(use_fp32), str(scheduler), str(num_gpus),
         )
         if cache.release(key):
             logger.info("force_unload: pipeline freed")
