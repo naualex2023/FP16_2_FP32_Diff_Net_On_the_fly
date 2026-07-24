@@ -401,7 +401,12 @@ def generate_dit(
     if callback is not None:
         from callback_utils import make_progress_callback
         call_kwargs["callback_on_step_end"] = make_progress_callback(callback)
-        call_kwargs["callback_on_step_end_inputs"] = callback_kwargs or []
+        # Not all diffusers pipelines accept callback_on_step_end_inputs
+        # (e.g. StableDiffusion3Pipeline). Probe the signature.
+        import inspect
+        sig = inspect.signature(pipe.__call__)
+        if "callback_on_step_end_inputs" in sig.parameters:
+            call_kwargs["callback_on_step_end_inputs"] = callback_kwargs or []
 
     logger.info("Generating DiT %dx%d, %d steps, CFG %.1f", width, height, steps, guidance_scale)
     entry_lock = entry.lock if entry is not None else _NullLock()
