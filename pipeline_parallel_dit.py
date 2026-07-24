@@ -33,6 +33,43 @@ logger = logging.getLogger(__name__)
 
 # Diffusers pipeline classes that use a transformer backbone (DiT).  The first
 # match wins.  Add more here as diffusers grows new DiT families.
+def _install_device_relay(module, target_device, return_device):
+    """Make *module* (living on *target_device*) callable from *return_device*.
+
+    Registers hooks that move the module's positional args / kwargs to
+    *target_device* before the forward pass, and move its output back to
+    *return_device* afterwards.  This lets a large module (e.g. T5-XXL) live on
+    a different GPU than the rest of the pipeline without the caller noticing.
+    """
+    def _move_any(obj, device):
+        if obj is None:
+            return None
+        if isinstance(obj, torch.Tensor):
+            return obj.to(device)
+        if isinstance(obj, dict):
+            return {k: _move_any(v, device) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            moved = [_move_any(x, device) for x in obj]
+            return type(obj)(moved)
+        if hasattr(obj, "__dict__"):
+            for k, v in list(vars(obj).items()):
+                if isinstance(v, torch.Tensor):
+                    setattr(obj, k, v.to(device))
+            return obj
+        return obj
+
+    def _pre(_m, args, kwargs):
+        new_args = tuple(_move_any(a, target_device) for a in args)
+        new_kwargs = {k: _move_any(v, target_device) for k, v in kwargs.items()}
+        return new_args, new_kwargs
+
+    def _post(_m, _args, output):
+        return _move_any(output, return_device)
+
+    module.register_forward_pre_hook(_pre, with_kwargs=True)
+    module.register_forward_hook(_post)
+
+
 _DIT_PIPELINE_CLASSES: tuple[str, ...] = (
     "PixArtAlphaPipeline",
     "PixArtSigmaPipeline",
@@ -163,10 +200,25 @@ def create_dit_pipeline_parallel(
 
     # Place text encoders + VAE on stage 0 (device_down).  These are small
     # relative to a 30–50 GB transformer.
-    for attr in ("text_encoder", "text_encoder_2", "text_encoder_3", "vae"):
+    # Balance components between the two GPUs to avoid OOM on device_down.
+    # T5-XXL (text_encoder_3) is the heaviest non-transformer component and
+    # would OOM device_down.  Keep it on device_up with a transparent device
+    # relay (forward hooks): inputs move to device_up before the forward, the
+    # output moves back to device_down afterwards.
+    for attr in ("text_encoder", "text_encoder_2", "vae"):
         sub = getattr(pipe, attr, None)
         if sub is not None:
-            setattr(pipe, attr, sub.to(device_down))
+            sub.to(device_down)
+
+    te3 = getattr(pipe, "text_encoder_3", None)
+    if te3 is not None:
+        te3.to(device_up)
+        _install_device_relay(te3, torch.device(device_up), torch.device(device_down))
+        logger.info(
+            "text_encoder_3 placed on %s with device relay back to %s",
+            device_up, device_down,
+        )
+
     if getattr(pipe, "safety_checker", None) is not None:
         pipe.safety_checker = None
 
