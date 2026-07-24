@@ -243,6 +243,15 @@ def download_hf_model(
     pipe = cls.from_pretrained(repo_id, torch_dtype=torch_dtype)
     pipe.save_pretrained(dst)
     logger.info("Downloaded %s → %s", repo_id, dst)
+
+    # Удалить модель из кэша HuggingFace, чтобы не дублировать на диске
+    # (модель уже сохранена в ./models/ через save_pretrained).
+    try:
+        from clear_cache import purge_hf_cache_entry
+        purge_hf_cache_entry(repo_id)
+    except Exception as exc:
+        logger.warning("Could not purge HF cache for %s: %s", repo_id, exc)
+
     return os.path.abspath(dst)
 
 

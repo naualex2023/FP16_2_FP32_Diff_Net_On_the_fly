@@ -69,6 +69,14 @@ def download(name: str, force: bool = False) -> None:
     pipe.save_pretrained(dst)
     logger.info("[%s] done.", name)
 
+    # Удалить модель из кэша HuggingFace, чтобы не дублировать на диске
+    # (модель уже сохранена в ./models/ через save_pretrained).
+    try:
+        from clear_cache import purge_hf_cache_entry
+        purge_hf_cache_entry(info["repo"])
+    except Exception as exc:
+        logger.warning("[%s] could not purge HF cache: %s", name, exc)
+
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
