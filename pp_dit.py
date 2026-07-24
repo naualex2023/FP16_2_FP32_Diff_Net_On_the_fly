@@ -209,7 +209,7 @@ class PipelineParallelDiT(nn.Module):
             # Post-hook on the last block of the last stage: return home.
             if stage_idx == self.n_stages - 1:
                 last_blk = stage_blocks[-1]
-                return_dev = self._return_device
+                return_dev = self.devices[0]  # stage 0, where norm_out/proj_out live
 
                 def _make_post(ret_dev):
                     def _post(_module, _args, output):
