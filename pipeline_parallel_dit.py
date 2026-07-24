@@ -347,6 +347,7 @@ def create_dit_pipeline_parallel(
         pipe.transformer,
         devices=tx_device_strs,
         chunk_sizes=plan.transformer_chunk_sizes,
+        return_device=devices[0],  # pipeline home (cuda:0)
     )
 
     pipe.enable_model_cpu_offload = lambda: None

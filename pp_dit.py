@@ -66,6 +66,7 @@ class PipelineParallelDiT(nn.Module):
         devices: Optional[List[str]] = None,
         split_ratio: float = 0.5,
         chunk_sizes: Optional[List[int]] = None,
+        return_device: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -75,6 +76,10 @@ class PipelineParallelDiT(nn.Module):
         else:
             self.devices = [torch.device(device_down), torch.device(device_up)]
         self.n_stages = len(self.devices)
+
+        # Where to return the final output. Defaults to devices[0] but can
+        # differ when the pipeline home != transformer stage 0.
+        self._return_device = torch.device(return_device) if return_device else self.devices[0]
 
         # Keep reference to original transformer without registering as child.
         object.__setattr__(self, "_dit", dit)
@@ -204,13 +209,14 @@ class PipelineParallelDiT(nn.Module):
             # Post-hook on the last block of the last stage: return home.
             if stage_idx == self.n_stages - 1:
                 last_blk = stage_blocks[-1]
+                return_dev = self._return_device
 
-                def _make_post(home_dev):
+                def _make_post(ret_dev):
                     def _post(_module, _args, output):
-                        return _move(output, home_dev)
+                        return _move(output, ret_dev)
                     return _post
 
-                last_blk.register_forward_hook(_make_post(home_device))
+                last_blk.register_forward_hook(_make_post(return_dev))
 
     # ------------------------------------------------------------------
     # Properties
@@ -327,10 +333,11 @@ class PipelineParallelDiT(nn.Module):
 
         out = self._dit(**fwd_kwargs)
 
+        ret = self._return_device
         if isinstance(out, torch.Tensor):
-            return out.to(home)
+            return out.to(ret)
         if hasattr(out, "sample"):
-            if out.sample.device != home:
-                out.sample = out.sample.to(home)
+            if out.sample.device != ret:
+                out.sample = out.sample.to(ret)
             return out
-        return tuple(_move(t, home) if isinstance(t, torch.Tensor) else t for t in out)
+        return tuple(_move(t, ret) if isinstance(t, torch.Tensor) else t for t in out)
